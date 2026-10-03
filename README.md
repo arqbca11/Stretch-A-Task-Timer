@@ -8,9 +8,9 @@ It's a desktop port of a single-file web app (`reference/switch-card.html`). The
 [Tauri 2](https://tauri.app): a Rust backend, the original page running in a WKWebView, and a
 menu bar item that shows the running block.
 
-> **Status: work in progress.** Storage, migration, the tray and the ported page all work. Still
-> to do: verify the menu bar behaviour by hand, measure the die's frame time in the app, and
-> package a release build.
+> **Status: working.** Storage, migration, the menu bar item and the ported page are done and in
+> daily use. Still open: measuring the die's full frame time inside the app, and checking that the
+> "minutes up" notification appears in the release build.
 
 ## What it does
 
