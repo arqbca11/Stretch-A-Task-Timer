@@ -1,11 +1,11 @@
 [package]
-name = "switch-card"
+name = "stretch"
 version = "0.1.0"
-description = "Roll a number, work that many minutes. A macOS menu bar timer."
+description = "Stretch: roll a number, work that many minutes. A macOS menu bar task timer."
 edition = "2021"
 
 [lib]
-name = "switch_card_lib"
+name = "stretch_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

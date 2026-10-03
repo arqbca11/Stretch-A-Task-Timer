@@ -210,7 +210,7 @@ impl Store {
             // The record that triggered this is already durable in the log. A failed checkpoint
             // only means the log keeps growing; the next append tries again.
             if let Err(e) = self.checkpoint() {
-                eprintln!("switch-card: checkpoint failed: {e}");
+                eprintln!("stretch: checkpoint failed: {e}");
             }
         }
     }

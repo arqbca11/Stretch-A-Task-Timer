@@ -1,4 +1,8 @@
-# Switch Card — desktop
+# Stretch — desktop
+
+The app is named **Stretch** (it was "Switch Card"; stretching interactions come later). The
+bundle identifier stays `com.ruoqi.switchcard` so the data directory doesn't move, and the
+internal bridge keeps the name `window.switchcard`. Don't rename either.
 
 A macOS menu bar app for Ruoqi's "roll a number, work that many minutes" method. It is a port of a
 working web version (`reference/switch-card.html`) into a Tauri shell, with a menu bar item and
@@ -184,11 +188,11 @@ npm run tauri dev
 npm test                       # node --test test/
 cargo test --manifest-path src-tauri/Cargo.toml
 npm run tauri build -- --target aarch64-apple-darwin
-# → src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Switch Card.app (+ dmg/)
+# → src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Stretch.app (+ dmg/)
 ```
 
 The app is unsigned for personal use. First launch: right-click the app → Open, or
-`xattr -dr com.apple.quarantine "Switch Card.app"`.
+`xattr -dr com.apple.quarantine "Stretch.app"`.
 
 ## Tests that must exist
 

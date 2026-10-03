@@ -42,7 +42,7 @@ pub fn run() {
 
             let store = open_store(app);
             if let Err(e) = &store {
-                eprintln!("switch-card: storage unavailable: {e}");
+                eprintln!("stretch: storage unavailable: {e}");
             }
             app.manage(StoreState(Mutex::new(store)));
             tray::setup(app.handle())?;
@@ -64,5 +64,5 @@ pub fn run() {
             commands::status
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Switch Card");
+        .expect("error while running Stretch");
 }

@@ -1,10 +1,11 @@
-# Switch Card
+# Stretch - A Task Timer
 
 A macOS menu bar timer for one way of working: **roll a number between 30 and 100, then work on
 one thing for that many minutes.** When the time is up, log the block and roll again, or switch.
-Each logged block earns Tetris pieces.
+Each logged block earns Tetris pieces. Stretching interactions between blocks are planned.
 
-It's a desktop port of a single-file web app (`reference/switch-card.html`). The app is built with
+Stretch started as a desktop port of a single-file web app called Switch Card
+(`reference/switch-card.html`). The app is built with
 [Tauri 2](https://tauri.app): a Rust backend, the original page running in a WKWebView, and a
 menu bar item that shows the running block.
 
@@ -40,11 +41,17 @@ npm run tauri build -- --target aarch64-apple-darwin   # build the .app and .dmg
 
 The bundle is written to `src-tauri/target/aarch64-apple-darwin/release/bundle/macos/`. It is
 unsigned, so on first launch right-click → Open, or run
-`xattr -dr com.apple.quarantine "Switch Card.app"`.
+`xattr -dr com.apple.quarantine "Stretch.app"`. To install it, copy it to `/Applications`
+(quit the app first):
+
+```sh
+ditto "src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Stretch.app" /Applications/Stretch.app
+```
 
 ## Storage
 
-Data lives in `~/Library/Application Support/com.ruoqi.switchcard/`. Nothing goes over the
+Data lives in `~/Library/Application Support/com.ruoqi.switchcard/`. The bundle identifier
+keeps the app's original name so existing history stays where it is. Nothing goes over the
 network, and the app uses no database library.
 
 ```

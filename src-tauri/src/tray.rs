@@ -102,7 +102,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let tray = TrayIconBuilder::with_id("main")
         .icon(Image::from_bytes(include_bytes!("../icons/trayTemplate@2x.png"))?)
         .icon_as_template(true)
-        .tooltip("Switch Card")
+        .tooltip("Stretch")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
@@ -131,7 +131,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 let want = !al.is_enabled().unwrap_or(false);
                 let res = if want { al.enable() } else { al.disable() };
                 if let Err(e) = res {
-                    eprintln!("switch-card: launch at login: {e}");
+                    eprintln!("stretch: launch at login: {e}");
                 }
                 let _ = login_item.set_checked(al.is_enabled().unwrap_or(false));
             }
@@ -199,8 +199,8 @@ fn refresh(app: &AppHandle) {
         }
     }
     if let Some(body) = notify {
-        if let Err(e) = app.notification().builder().title("Switch Card").body(body).show() {
-            eprintln!("switch-card: notification: {e}");
+        if let Err(e) = app.notification().builder().title("Stretch").body(body).show() {
+            eprintln!("stretch: notification: {e}");
         }
     }
 }

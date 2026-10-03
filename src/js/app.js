@@ -1353,7 +1353,7 @@ import {
     document.querySelector(".wrap").hidden = true;
     var p = document.createElement("p");
     p.className = "note storage-down";
-    p.textContent = "Switch Card couldn't open your history, so it isn't showing or changing anything. " + err;
+    p.textContent = "Stretch couldn't open your history, so it isn't showing or changing anything. " + err;
     document.body.appendChild(p);
   });
 
