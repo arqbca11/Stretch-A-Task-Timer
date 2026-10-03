@@ -8,8 +8,9 @@ It's a desktop port of a single-file web app (`reference/switch-card.html`). The
 [Tauri 2](https://tauri.app): a Rust backend, the original page running in a WKWebView, and a
 menu bar item that shows the running block.
 
-> **Status: work in progress.** The Rust side is done: storage, migration, tray and commands.
-> The panel still shows a placeholder page while the web app is being ported.
+> **Status: work in progress.** Storage, migration, the tray and the ported page all work. Still
+> to do: verify the menu bar behaviour by hand, measure the die's frame time in the app, and
+> package a release build.
 
 ## What it does
 
@@ -74,6 +75,9 @@ game.json         Tetris state, replaced atomically
 - **Outcomes, not inputs.** Records store what the app decided at the time: the reward granted,
   `auto: true` for blocks auto-logged at 3 h, and the day a block was filed under. Replay never
   recomputes these, so changing the reward formula doesn't rewrite history.
+- **Ordered writes.** `bridge.js` sends writes (and status) one at a time, in order, each image
+  captured when it's issued. Tauri doesn't guarantee that two in-flight `invoke`s arrive in order,
+  and with whole-day records a reordered pair would let an older image win.
 - **One copy of the truth.** The page has no `localStorage` cache and nothing is merged: it
   renders what `load()` returns and writes back through four commands (`load`, `put_day`,
   `put_game`, `status`). The web version lost data when a stale browser cache won a
@@ -97,7 +101,12 @@ The real export is personal and listed in `.gitignore`. For the format, see
 
 ```
 src/                  frontend, served as-is (no bundler)
+  index.html          the reference page's markup, unchanged
+  js/app.js           the reference page's script; storage replaced by the bridge
+  js/rules.js         pure rules shared with the tests: rewards, day keys, idle rows
   js/bridge.js        window.switchcard = { load, putDay, putGame, status } over Tauri invoke
+  css/, fonts/        the reference styles, and Karla + Bricolage Grotesque served locally
+test/                 node --test suites for rules.js
 src-tauri/src/
   store.rs            log + snapshot storage, recovery, checkpoint, import (unit-tested)
   tray.rs             menu bar icon, title ticker, context menu, notification (title tests)

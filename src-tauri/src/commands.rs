@@ -18,7 +18,13 @@ fn with_store<T>(state: &StoreState, f: impl FnOnce(&mut Store) -> crate::store:
 
 #[tauri::command]
 pub fn load(state: State<'_, StoreState>) -> Result<Value, String> {
-    with_store(&state, |s| Ok(json!({ "days": s.days(), "game": s.load_game()? })))
+    let r = with_store(&state, |s| Ok(json!({ "days": s.days(), "game": s.load_game()? })));
+    #[cfg(debug_assertions)]
+    eprintln!("switch-card: load -> {}", match &r {
+        Ok(v) => format!("{} days", v["days"].as_object().map_or(0, |d| d.len())),
+        Err(e) => format!("error: {e}"),
+    });
+    r
 }
 
 #[tauri::command]
@@ -33,5 +39,7 @@ pub fn put_game(state: State<'_, StoreState>, game: Value) -> Result<(), String>
 
 #[tauri::command]
 pub fn status(app: AppHandle, status: Status) {
+    #[cfg(debug_assertions)]
+    eprintln!("switch-card: status {status:?}");
     tray::set_status(&app, status);
 }

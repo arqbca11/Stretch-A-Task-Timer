@@ -106,6 +106,7 @@ export function carveIdle(day, s, e){
 }
 
 /* ---------- rewards ---------- */
+// minutes since midnight at start; before the 4:30 roll-over counts as after midnight (24:xx)
 export function startMinute(ts){
   var m = minuteOfDay(new Date(ts));
   return m < ROLL_MIN ? m + 1440 : m;

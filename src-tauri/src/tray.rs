@@ -117,12 +117,13 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             }
         })
         .on_menu_event(move |app, event| match event.id().as_ref() {
-            "done" | "keepGoing" => {
-                let _ = app.emit("tray-action", event.id().as_ref());
+            "done" => {
+                let _ = app.emit("tray-action", "done");
             }
-            "roll" => {
+            // Both start a roll, which waits for a tap on Stop, so they need the panel.
+            "keepGoing" | "roll" => {
                 show_panel(app);
-                let _ = app.emit("tray-action", "roll");
+                let _ = app.emit("tray-action", event.id().as_ref());
             }
             "open" => show_panel(app),
             "login" => {

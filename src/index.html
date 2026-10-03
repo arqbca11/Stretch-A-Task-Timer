@@ -1,16 +1,68 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Switch Card</title>
-<link rel="stylesheet" href="placeholder.css">
+<link rel="stylesheet" href="css/fonts.css">
+<link rel="stylesheet" href="css/app.css">
 </head>
 <body>
-<!-- Placeholder until the reference page is ported (step 4). Exercises the bridge end to end. -->
-<h1>Switch Card</h1>
-<pre id="out">loading…</pre>
+<div class="wrap">
+
+  <div class="datehead"><b id="today-label">Today</b><span id="save-note"></span></div>
+
+  <section class="dial">
+    <div class="readout">
+      <button class="die-wrap" id="die-wrap" aria-label="Roll a number">
+        <canvas class="die-shadow" id="die-shadow"></canvas>
+        <div class="die-lift" id="die-lift"><div class="die" id="die"></div></div>
+      </button>
+      <div class="numeral" id="numeral" hidden></div>
+      <div class="unit" id="unit">minutes</div>
+    </div>
+    <div class="sub" id="sub">Roll a number, name the task, start.</div>
+    <div class="bar" id="bar" hidden><span id="barfill"></span></div>
+
+    <div class="controls" id="controls"></div>
+  </section>
+
+  <section class="game" aria-label="Reward game">
+    <div class="game-grid">
+      <canvas id="board" tabindex="0" aria-label="Tetris board. Arrow keys move, up rotates, space drops."></canvas>
+      <div class="game-side">
+        <div>
+          <div class="g-total" id="g-total">0</div>
+          <div class="g-label">total score</div>
+        </div>
+        <div class="g-stats" id="g-stats"></div>
+        <div class="g-bank" id="g-bank"></div>
+        <div id="g-actions"></div>
+        <div class="g-next" id="g-next-wrap" hidden><canvas id="g-next"></canvas><span>next</span></div>
+        <div class="pad" id="pad" hidden>
+          <span></span><button data-act="rotate" aria-label="Rotate">&#8635;</button><span></span>
+          <button data-act="left" aria-label="Left">&larr;</button><button data-act="down" aria-label="Down">&darr;</button><button data-act="right" aria-label="Right">&rarr;</button>
+          <button class="wide" data-act="drop">Drop</button>
+        </div>
+        <div class="g-msg" id="g-msg" aria-live="polite"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="log">
+    <h2><span>Today</span><em id="today-summary"></em></h2>
+    <div id="today-entries"></div>
+    <div id="manual"></div>
+  </section>
+
+  <details class="past" id="past">
+    <summary id="past-summary">Earlier days</summary>
+    <div id="past-body"></div>
+  </details>
+
+  <p class="note">Edit any row, today or earlier: rename the task, or fix the planned and worked minutes by typing over them.</p>
+</div>
 <script src="js/bridge.js"></script>
-<script src="js/placeholder.js"></script>
+<script type="module" src="js/app.js"></script>
 </body>
 </html>
