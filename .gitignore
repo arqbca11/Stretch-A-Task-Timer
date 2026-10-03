@@ -1,0 +1,8 @@
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+.DS_Store
+
+# Personal history: imported on first launch, never committed.
+reference/seed-export.json
+src-tauri/resources/seed-export.json

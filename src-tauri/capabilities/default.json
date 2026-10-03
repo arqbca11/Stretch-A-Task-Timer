@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The panel window: core IPC plus the three plugins the app uses.",
+  "windows": ["panel"],
+  "permissions": [
+    "core:default",
+    "positioner:default",
+    "notification:default",
+    "autostart:default"
+  ]
+}
