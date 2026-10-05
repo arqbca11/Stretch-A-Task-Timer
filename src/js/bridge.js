@@ -31,6 +31,11 @@
     if (typeof fn === "function") fn();
   });
 
+  // The tray menu switches the panel between Roll and Stretch mode.
+  window.switchcard.onMode = function (fn) {
+    listen("set-mode", function (ev) { fn(ev.payload); });
+  };
+
   // Hidden panels don't reliably fire visibilitychange in WKWebView; Rust says when it hides.
   listen("panel-visibility", function (ev) {
     window.switchcard.panelVisible = !!ev.payload;

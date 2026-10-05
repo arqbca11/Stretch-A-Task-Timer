@@ -25,7 +25,11 @@ menu bar item that shows the running block.
   past the plan, and starting early in the day all earn more. Your total score carries over
   between games.
 - **Menu bar.** Left-click opens the panel. Right-click gives *Done, log it*, *Keep going*,
-  *Roll a number*, *Open*, *Launch at login* and *Quit*. The app has no Dock icon.
+  *Roll a number*, *Roll mode* / *Stretch mode*, *Open*, *Launch at login* and *Quit*. The app
+  has no Dock icon.
+- **Stretch mode (prototype).** A whole-day timeline: press and hold to place a block, keep
+  holding and pull down to stretch it. Hold on a running block to start a parallel one: the
+  panel splits into columns, and you can drag the line between them. Not saved yet.
 
 ## Build and run
 

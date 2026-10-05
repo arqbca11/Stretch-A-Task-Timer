@@ -6,8 +6,19 @@
 <title>Stretch</title>
 <link rel="stylesheet" href="css/fonts.css">
 <link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/stretch.css">
 </head>
 <body>
+<section class="stretch" id="stretch" aria-label="Stretch mode" hidden>
+  <div class="st-head"><b id="st-date">Today</b><span id="st-msg" aria-live="polite"></span></div>
+  <div class="st-scroll" id="st-scroll">
+    <div class="st-day" id="st-day">
+      <div class="st-axis" id="st-axis"></div>
+      <div class="st-lane" id="st-lane"><div class="st-now" id="st-now"><span></span></div></div>
+    </div>
+  </div>
+</section>
+
 <div class="wrap">
 
   <div class="datehead"><b id="today-label">Today</b><span id="save-note"></span></div>
@@ -64,5 +75,6 @@
 </div>
 <script src="js/bridge.js"></script>
 <script type="module" src="js/app.js"></script>
+<script type="module" src="js/stretch.js"></script>
 </body>
 </html>

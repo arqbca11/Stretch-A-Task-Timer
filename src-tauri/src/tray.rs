@@ -89,16 +89,20 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let keep_going = MenuItem::with_id(app, "keepGoing", "Keep going", false, None::<&str>)?;
     let roll = MenuItem::with_id(app, "roll", "Roll a number", true, None::<&str>)?;
     let open = MenuItem::with_id(app, "open", "Open", true, None::<&str>)?;
+    // The panel has two modes; the page always starts in Roll.
+    let mode_roll = CheckMenuItem::with_id(app, "mode:roll", "Roll mode", true, true, None::<&str>)?;
+    let mode_stretch = CheckMenuItem::with_id(app, "mode:stretch", "Stretch mode", true, false, None::<&str>)?;
     let login_on = app.autolaunch().is_enabled().unwrap_or(false);
     let login = CheckMenuItem::with_id(app, "login", "Launch at login", true, login_on, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let sep = || PredefinedMenuItem::separator(app);
     let menu = Menu::with_items(
         app,
-        &[&done, &keep_going, &roll, &sep()?, &open, &login, &sep()?, &quit],
+        &[&done, &keep_going, &roll, &sep()?, &mode_roll, &mode_stretch, &sep()?, &open, &login, &sep()?, &quit],
     )?;
 
     let login_item = login.clone();
+    let modes = (mode_roll.clone(), mode_stretch.clone());
     let tray = TrayIconBuilder::with_id("main")
         .icon(Image::from_bytes(include_bytes!("../icons/trayTemplate@2x.png"))?)
         .icon_as_template(true)
@@ -120,10 +124,19 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             "done" => {
                 let _ = app.emit("tray-action", "done");
             }
-            // Both start a roll, which waits for a tap on Stop, so they need the panel.
+            // Both start a roll, which waits for a tap on Stop, so they need the panel in Roll mode.
             "keepGoing" | "roll" => {
+                set_mode(app, &modes, "roll");
                 show_panel(app);
                 let _ = app.emit("tray-action", event.id().as_ref());
+            }
+            "mode:roll" => {
+                set_mode(app, &modes, "roll");
+                show_panel(app);
+            }
+            "mode:stretch" => {
+                set_mode(app, &modes, "stretch");
+                show_panel(app);
             }
             "open" => show_panel(app),
             "login" => {
@@ -158,6 +171,14 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         }
     });
     Ok(())
+}
+
+/// Tick the chosen mode in the menu (a check item toggles itself on click, so set both) and tell
+/// the page to switch.
+fn set_mode(app: &AppHandle, items: &(CheckMenuItem<tauri::Wry>, CheckMenuItem<tauri::Wry>), mode: &str) {
+    let _ = items.0.set_checked(mode == "roll");
+    let _ = items.1.set_checked(mode == "stretch");
+    let _ = app.emit_to("panel", "set-mode", mode);
 }
 
 /// Called by the `status` command whenever the page's running block changes.

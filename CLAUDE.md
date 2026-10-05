@@ -46,6 +46,8 @@ src/                       frontend, served as-is
   js/bridge.js             defines window.switchcard = { load, putDay, putGame, status } over invoke,
                            and forwards "tray-action" events to the page
   js/rules.js              pure functions shared with tests: rewardFor, dayKeyAt, idleBefore, carveIdle
+  js/stretch.js            Stretch mode (prototype): day timeline, elastic blocks, parallel tracks
+  css/stretch.css
   fonts/
 src-tauri/
   src/lib.rs               builder, plugins, setup, commands registration
@@ -78,7 +80,8 @@ reference/                 read-only inputs, never edited
   `resizable: false`, `alwaysOnTop: true`, `skipTaskbar: true`. Hide instead of closing, so the page
   (timer, Tetris) stays alive.
 - Right click: menu with `Done, log it`, `Keep going`, `Roll a number` (shows the panel and starts
-  the roll), `Open`, `Launch at login` (check item), `Quit`. Rebuild or enable/disable items when the
+  the roll), `Roll mode` / `Stretch mode` (check items; switch the panel, emitted as `set-mode`),
+  `Open`, `Launch at login` (check item), `Quit`. Rebuild or enable/disable items when the
   status changes so only valid actions are active.
 - When a running block reaches its planned minutes, the ticker sends one notification
   (`"Leetcode: 75 minutes up"`). Once per block (track the block id).
@@ -87,6 +90,14 @@ The page owns the app logic. It reports status whenever it changes:
 `window.switchcard.status({ running, id, task, startedAt, planned })` → command `status`.
 Tray menu actions go the other way: Rust emits `tray-action` with `done | keepGoing | roll`, and
 `bridge.js` calls the page's existing `finish()`, `keepGoing()`, `roll()`.
+
+## Stretch mode (prototype)
+
+A second panel mode, switched from the tray menu: press and hold on a day timeline to place a
+block, pull it to stretch it, and run blocks in parallel columns. It has its own black/white/teal
+palette, scoped to `body.mode-stretch`; Roll mode's look is unchanged. Its blocks live in memory
+only (not in the day log), and no rewards apply yet. Design history, the model and open
+questions are in `docs/stretch-mode.md`. Read it before changing Stretch mode.
 
 ## Storage: log + snapshot
 
