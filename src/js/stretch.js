@@ -140,6 +140,8 @@ import { dayKeyAt, dayBounds } from "./day.js";
   /* ---------- side by side ---------- */
   // Group blocks that overlap in time. Within a group, each track present gets a column whose
   // width is its weight's share among the tracks present; a block alone gets the full width.
+  // A group is transitive (A overlaps B overlaps C), so a column can be empty for part of it:
+  // each block then widens over the neighbouring columns that are free for its whole span.
   function arrange(now){
     var items = blocks.map(function(b){ return { b: b, s: b.start, e: extentOf(b, now) }; })
       .sort(function(x, y){ return x.s - y.s; });
@@ -162,8 +164,16 @@ import { dayKeyAt, dayBounds } from "./day.js";
         return { track: t, x0: x0, x1: x1, left: x0 + gl, width: x1 - x0 - gl - gr };
       });
       c.items.forEach(function(it){
-        var col = c.cols.find(function(k){ return k.track.id === it.b.track; });
-        it.b.col = { left: col.left, width: col.width };
+        var i = c.cols.findIndex(function(k){ return k.track.id === it.b.track; });
+        function free(j){
+          var id = c.cols[j].track.id;
+          return !c.items.some(function(o){ return o.b.track === id && o.s < it.e && it.s < o.e; });
+        }
+        it.lo = it.hi = i;
+        while (it.lo > 0 && free(it.lo - 1)) it.lo--;
+        while (it.hi < c.cols.length - 1 && free(it.hi + 1)) it.hi++;
+        var a = c.cols[it.lo], z = c.cols[it.hi];
+        it.b.col = { left: a.left, width: z.left + z.width - a.left };
       });
     });
   }
@@ -178,21 +188,40 @@ import { dayKeyAt, dayBounds } from "./day.js";
     drawSplits();
   }
 
-  // The lines between parallel columns, as tall as the group: drag one to change the split.
+  // The lines between parallel columns, only where a block on each side meets there: drag one
+  // to change the split.
   function drawSplits(){
     lane.querySelectorAll(".st-split").forEach(function(el){ el.remove(); });
     clusters.forEach(function(c){
       for (var i = 0; i < c.cols.length - 1; i++) {
-        var el = document.createElement("div");
-        el.className = "st-split";
-        el.title = "Drag to change the split";
-        el.style.top = yOf(c.to) + "px";
-        el.style.height = (yOf(c.from) - yOf(c.to)) + "px";
-        el.style.left = (c.cols[i].x1 - 5) + "px";
-        el.addEventListener("pointerdown", grabSplit.bind(null, c.cols[i], c.cols[i + 1]));
-        lane.append(el);
+        // the times when a block ending at this boundary runs beside one starting at it
+        var spans = [];
+        c.items.forEach(function(a){
+          if (a.hi !== i) return;
+          c.items.forEach(function(b){
+            if (b.lo === i + 1 && a.s < b.e && b.s < a.e) spans.push([Math.max(a.s, b.s), Math.min(a.e, b.e)]);
+          });
+        });
+        spans.sort(function(x, y){ return x[0] - y[0]; });
+        var merged = [];
+        spans.forEach(function(sp){
+          var last = merged[merged.length - 1];
+          if (last && sp[0] <= last[1]) last[1] = Math.max(last[1], sp[1]);
+          else merged.push(sp.slice());
+        });
+        merged.forEach(function(sp){ addSplit(c.cols[i], c.cols[i + 1], sp[0], sp[1]); });
       }
     });
+  }
+  function addSplit(left, right, from, to){
+    var el = document.createElement("div");
+    el.className = "st-split";
+    el.title = "Drag to change the split";
+    el.style.top = yOf(to) + "px";
+    el.style.height = (yOf(from) - yOf(to)) + "px";
+    el.style.left = (left.x1 - 5) + "px";
+    el.addEventListener("pointerdown", grabSplit.bind(null, left, right));
+    lane.append(el);
   }
 
   /* ---------- the day ---------- */

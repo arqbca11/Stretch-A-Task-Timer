@@ -80,6 +80,11 @@ Each round was built, installed and tried in the menu bar panel.
 11. **Stretch is the app.** Roll mode, the die, Tetris rewards and the mode items in the menu
     were removed (archived locally). The panel opens straight into the timeline. New icon: two
     parallel blocks, solid up to now.
+12. **Blocks widen into free columns.** A group of overlapping blocks is transitive, so a
+    column can be empty for part of it. A block planned later in the day kept its track's
+    narrow column even when only one other block ran beside it. Now each block widens over the
+    neighbouring columns that are free for its whole span, and split lines are drawn only where
+    two blocks actually meet.
 
 ## Current behaviour
 
@@ -125,8 +130,10 @@ track  { id, w }                                               left-to-right ord
   from the left. If the time is taken in all of them, it starts a new track. A press within a
   block's last 10 minutes goes after that block in the same track rather than beside it.
 - **Layout:** blocks that overlap in time form a group. Within a group, each track present gets
-  a column sized by its weight's share. A block that overlaps nothing takes the full width, even
-  if the day was split earlier. Elements are kept across renders, so blocks slide to their new
+  a column sized by its weight's share. Groups are transitive, so a block then **widens over
+  neighbouring columns that are free for its whole span** (like calendar apps). A block that
+  overlaps nothing takes the full width, even if the day was split earlier. Split lines appear
+  only where a block on each side of a boundary runs at the same time. Elements are kept across renders, so blocks slide to their new
   widths.
 - **Widths:** a new track takes `1/(n+1)` of the width it shares with the `n` tracks there
   (its weight is their mean). The others keep their proportions: a 40:60 pair becomes
