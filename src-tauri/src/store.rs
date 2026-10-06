@@ -1,19 +1,16 @@
-//! Day history as an append-only log of whole-day images plus a periodic snapshot.
+//! Stretch's days as an append-only log of whole-day images plus a periodic snapshot.
 //!
 //! ```text
-//! days.log          {"seq":N,"ts":..,"op":"day.put","day":{..}}\n   one record per line
-//! days.snapshot     {"seq":N,"days":{"YYYY-MM-DD":{..}}}          last checkpoint
-//! days.log.<seq>    rotated segments (the last two are kept)
-//! game.json         Tetris state, replaced atomically, not logged
+//! stretch.log          {"seq":N,"ts":..,"op":"day.put","day":{..}}\n   one record per line
+//! stretch.snapshot     {"seq":N,"days":{"YYYY-MM-DD":{..}}}          last checkpoint
+//! stretch.log.<seq>    rotated segments (the last two are kept)
 //! ```
 //!
 //! Recovery = snapshot + replay of log records with `seq > snapshot.seq`. Records are physical
 //! (whole days), so replay is idempotent and the last `day.put` for a date wins. Day objects are
-//! opaque JSON; only `date` is read here.
+//! opaque JSON; only `date` is read here. The design is in docs/storage.md.
 //!
-//! The same code runs a second, independent log for Stretch mode under another name
-//! (`stretch.log`, `stretch.snapshot`, `stretch.log.<seq>`); see [`Store::open_named`]. Each log
-//! has its own store and its own lock, so each file still has exactly one writer.
+//! The store is named, so the files are `<name>.log` etc.; the app opens one, [`STRETCH`].
 
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -23,16 +20,12 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The day history's log name; files are `<name>.log`, `<name>.snapshot`, `<name>.log.<seq>`.
-pub const DAYS: &str = "days";
-/// Stretch mode's log, kept apart from the day history.
+/// The app's log; files are `<name>.log`, `<name>.snapshot`, `<name>.log.<seq>`.
 pub const STRETCH: &str = "stretch";
 #[cfg(test)]
-const LOG: &str = "days.log";
+const LOG: &str = "stretch.log";
 #[cfg(test)]
-const SNAPSHOT: &str = "days.snapshot";
-const GAME: &str = "game.json";
-const GAME_TMP: &str = "game.json.tmp";
+const SNAPSHOT: &str = "stretch.snapshot";
 const KEEP_SEGMENTS: usize = 2;
 
 #[derive(Debug)]
@@ -94,8 +87,6 @@ pub struct Store {
     /// Last sequence number written (or recovered). Never reused.
     seq: u64,
     snapshot_seq: u64,
-    has_snapshot: bool,
-    import_recorded: bool,
     log: File,
     /// Length of the log up to the end of the last record known to be complete.
     log_bytes: u64,
@@ -127,16 +118,8 @@ fn day_date(day: &Value) -> Option<&str> {
 }
 
 impl Store {
-    pub fn open(dir: impl Into<PathBuf>) -> Result<Store> {
-        Store::open_with(dir, Limits::default())
-    }
-
-    pub fn open_with(dir: impl Into<PathBuf>, limits: Limits) -> Result<Store> {
-        Store::open_named(dir, DAYS, limits)
-    }
-
-    /// Open the log called `name` in `dir`. Only the `days` store owns `game.json`.
-    pub fn open_named(dir: impl Into<PathBuf>, name: &str, limits: Limits) -> Result<Store> {
+    /// Open (or create) the log called `name` in `dir`, recovering its state.
+    pub fn open(dir: impl Into<PathBuf>, name: &str, limits: Limits) -> Result<Store> {
         let dir = dir.into();
         let log_name = format!("{name}.log");
         let snapshot_name = format!("{name}.snapshot");
@@ -144,15 +127,11 @@ impl Store {
         fs::create_dir_all(&dir)?;
         // A leftover .tmp is a checkpoint that never got renamed: the old snapshot is still valid.
         let _ = fs::remove_file(dir.join(&snapshot_tmp));
-        if name == DAYS {
-            let _ = fs::remove_file(dir.join(GAME_TMP));
-        }
 
         let mut days = BTreeMap::new();
         let mut snapshot_seq = 0;
         let snap_path = dir.join(&snapshot_name);
-        let has_snapshot = snap_path.exists();
-        if has_snapshot {
+        if snap_path.exists() {
             let corrupt = |detail: String| StoreError::Corrupt { file: snap_path.clone(), detail };
             let v: Value = serde_json::from_slice(&fs::read(&snap_path)?)
                 .map_err(|e| corrupt(format!("not valid JSON: {e}")))?;
@@ -182,8 +161,6 @@ impl Store {
             days,
             seq: snapshot_seq.max(replay.last_seq),
             snapshot_seq,
-            has_snapshot,
-            import_recorded: replay.import_recorded,
             log,
             log_bytes: replay.good_len,
             log_records: replay.records,
@@ -245,7 +222,7 @@ impl Store {
     ///
     /// Crash windows: before the snapshot rename, the old snapshot + full log are intact. After
     /// it but before the log is rotated, replay skips the records with `seq <= snapshot.seq`.
-    /// After `days.log` is renamed but before a new one exists, a missing log reads as empty.
+    /// After the log is renamed but before a new one exists, a missing log reads as empty.
     pub fn checkpoint(&mut self) -> Result<()> {
         if self.poisoned {
             return Err(StoreError::Poisoned);
@@ -255,7 +232,6 @@ impl Store {
             .map_err(|e| StoreError::Invalid(e.to_string()))?;
         replace_file(&self.dir, &self.snapshot_tmp, &self.snapshot_name, &bytes)?;
         self.snapshot_seq = self.seq;
-        self.has_snapshot = true;
 
         let log_path = self.dir.join(&self.log_name);
         fs::rename(&log_path, self.dir.join(format!("{}.{}", self.log_name, self.seq)))?;
@@ -283,71 +259,18 @@ impl Store {
         }
         Ok(())
     }
-
-    /// True until a seed import has fully completed. The marker is written after the imported
-    /// days, so a crash part-way leaves no marker and the import is redone (idempotently).
-    pub fn needs_import(&self) -> bool {
-        !self.has_snapshot && !self.import_recorded
-    }
-
-    /// One-time import of a web export (`{days: {date: day}, game: {..}, ...}`). With `None`
-    /// (no seed bundled), only the marker is written, so a seed added later can't overwrite
-    /// days logged in the meantime. Returns whether anything ran.
-    pub fn import_seed(&mut self, seed: Option<&Value>) -> Result<bool> {
-        if !self.needs_import() {
-            return Ok(false);
-        }
-        let mut source = "none";
-        if let Some(seed) = seed {
-            source = "seed-export";
-            if let Some(days) = seed.get("days").and_then(Value::as_object) {
-                for (key, day) in days {
-                    if day_date(day) != Some(key.as_str()) {
-                        return Err(StoreError::Invalid(format!("seed day {key} has a mismatched date")));
-                    }
-                    self.append(json!({ "seq": self.seq + 1, "ts": now_ms(), "op": "day.put", "day": day }))?;
-                    self.days.insert(key.clone(), day.clone());
-                }
-            }
-            if let Some(game) = seed.get("game").filter(|g| g.is_object()) {
-                self.put_game(game)?;
-            }
-        }
-        self.append(json!({ "seq": self.seq + 1, "ts": now_ms(), "op": "import", "source": source }))?;
-        self.import_recorded = true;
-        self.checkpoint()?;
-        Ok(true)
-    }
-
-    pub fn load_game(&self) -> Result<Option<Value>> {
-        let path = self.dir.join(GAME);
-        match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|e| StoreError::Corrupt { file: path, detail: format!("not valid JSON: {e}") }),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    pub fn put_game(&mut self, game: &Value) -> Result<()> {
-        let bytes = serde_json::to_vec(game).map_err(|e| StoreError::Invalid(e.to_string()))?;
-        replace_file(&self.dir, GAME_TMP, GAME, &bytes)?;
-        Ok(())
-    }
 }
 
 struct Replay {
     last_seq: u64,
     good_len: u64,
     records: u64,
-    import_recorded: bool,
 }
 
-/// Apply `days.log` on top of the snapshot. A torn final line is truncated away; any other bad
+/// Apply the log on top of the snapshot. A torn final line is truncated away; any other bad
 /// line is corruption and aborts without touching the file.
 fn replay_log(path: &Path, snapshot_seq: u64, days: &mut BTreeMap<String, Value>) -> Result<Replay> {
-    let mut out = Replay { last_seq: 0, good_len: 0, records: 0, import_recorded: false };
+    let mut out = Replay { last_seq: 0, good_len: 0, records: 0 };
     let bytes = match fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
@@ -394,7 +317,6 @@ fn replay_log(path: &Path, snapshot_seq: u64, days: &mut BTreeMap<String, Value>
                     days.insert(date.to_owned(), day.clone());
                 }
             }
-            Some("import") => out.import_recorded = true,
             other => return Err(corrupt(line_no, format!("unknown op {other:?}"))),
         }
         out.last_seq = seq;
@@ -416,8 +338,12 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn open(dir: &Path) -> Result<Store> {
+        Store::open(dir, STRETCH, Limits::default())
+    }
+
     fn day(date: &str, n: u64) -> Value {
-        json!({ "date": date, "entries": [{ "id": format!("b{n}"), "task": "Leetcode", "worked": n }], "updatedAt": n })
+        json!({ "date": date, "blocks": [{ "id": n, "task": "Leetcode", "track": 1, "plan": 30 }], "updatedAt": n })
     }
 
     fn log_text(dir: &Path) -> String {
@@ -428,12 +354,12 @@ mod tests {
     fn append_and_reload() {
         let tmp = TempDir::new().unwrap();
         {
-            let mut s = Store::open(tmp.path()).unwrap();
+            let mut s = open(tmp.path()).unwrap();
             s.put_day(day("2026-09-25", 1)).unwrap();
             s.put_day(day("2026-09-26", 2)).unwrap();
             s.put_day(day("2026-09-25", 3)).unwrap(); // last put for a date wins
         }
-        let s = Store::open(tmp.path()).unwrap();
+        let s = open(tmp.path()).unwrap();
         assert_eq!(s.days().len(), 2);
         assert_eq!(s.days()["2026-09-25"], day("2026-09-25", 3));
         assert_eq!(s.days()["2026-09-26"], day("2026-09-26", 2));
@@ -443,7 +369,7 @@ mod tests {
     #[test]
     fn rejects_day_without_date() {
         let tmp = TempDir::new().unwrap();
-        let mut s = Store::open(tmp.path()).unwrap();
+        let mut s = open(tmp.path()).unwrap();
         assert!(matches!(s.put_day(json!({ "entries": [] })), Err(StoreError::Invalid(_))));
         assert_eq!(s.seq(), 0);
     }
@@ -452,7 +378,7 @@ mod tests {
     fn torn_final_line_is_truncated() {
         let tmp = TempDir::new().unwrap();
         {
-            let mut s = Store::open(tmp.path()).unwrap();
+            let mut s = open(tmp.path()).unwrap();
             s.put_day(day("2026-09-25", 1)).unwrap();
             s.put_day(day("2026-09-26", 2)).unwrap();
         }
@@ -461,14 +387,14 @@ mod tests {
         f.write_all(br#"{"seq":3,"ts":1,"op":"day.put","day":{"date":"2026-09"#).unwrap();
         drop(f);
 
-        let mut s = Store::open(tmp.path()).unwrap();
+        let mut s = open(tmp.path()).unwrap();
         assert_eq!(fs::metadata(tmp.path().join(LOG)).unwrap().len(), good);
         assert_eq!(s.days().len(), 2);
         assert_eq!(s.seq(), 2);
         // Appending after recovery yields a clean log.
         s.put_day(day("2026-09-27", 3)).unwrap();
         drop(s);
-        let s = Store::open(tmp.path()).unwrap();
+        let s = open(tmp.path()).unwrap();
         assert_eq!(s.days().len(), 3);
     }
 
@@ -476,7 +402,7 @@ mod tests {
     fn final_line_without_newline_is_torn_even_if_it_parses() {
         let tmp = TempDir::new().unwrap();
         {
-            let mut s = Store::open(tmp.path()).unwrap();
+            let mut s = open(tmp.path()).unwrap();
             s.put_day(day("2026-09-25", 1)).unwrap();
         }
         let good = fs::metadata(tmp.path().join(LOG)).unwrap().len();
@@ -485,7 +411,7 @@ mod tests {
             .unwrap();
         drop(f);
 
-        let s = Store::open(tmp.path()).unwrap();
+        let s = open(tmp.path()).unwrap();
         assert_eq!(fs::metadata(tmp.path().join(LOG)).unwrap().len(), good);
         assert!(!s.days().contains_key("2026-09-26"));
     }
@@ -494,7 +420,7 @@ mod tests {
     fn corrupt_middle_line_fails_and_leaves_file_untouched() {
         let tmp = TempDir::new().unwrap();
         {
-            let mut s = Store::open(tmp.path()).unwrap();
+            let mut s = open(tmp.path()).unwrap();
             for n in 1..=3 {
                 s.put_day(day(&format!("2026-09-2{n}"), n)).unwrap();
             }
@@ -505,7 +431,7 @@ mod tests {
         let damaged = lines.join("\n") + "\n";
         fs::write(tmp.path().join(LOG), &damaged).unwrap();
 
-        match Store::open(tmp.path()) {
+        match open(tmp.path()) {
             Err(StoreError::Corrupt { detail, .. }) => assert!(detail.contains("line 2"), "{detail}"),
             Err(e) => panic!("expected corruption, got {e}"),
             Ok(_) => panic!("expected corruption, got a store"),
@@ -514,10 +440,30 @@ mod tests {
     }
 
     #[test]
+    fn unknown_op_is_corruption() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut s = open(tmp.path()).unwrap();
+            s.put_day(day("2026-09-25", 1)).unwrap();
+        }
+        let mut f = OpenOptions::new().append(true).open(tmp.path().join(LOG)).unwrap();
+        f.write_all(b"{\"seq\":2,\"ts\":1,\"op\":\"day.merge\"}\n").unwrap();
+        f.write_all(format!("{}\n", json!({ "seq": 3, "ts": 1, "op": "day.put", "day": day("2026-09-26", 3) })).as_bytes())
+            .unwrap();
+        drop(f);
+        // Replay can't know what an op it doesn't understand would have done, so it refuses.
+        match open(tmp.path()) {
+            Err(StoreError::Corrupt { detail, .. }) => assert!(detail.contains("unknown op"), "{detail}"),
+            Err(e) => panic!("expected corruption, got {e}"),
+            Ok(_) => panic!("expected corruption, got a store"),
+        }
+    }
+
+    #[test]
     fn checkpoint_rotation_and_replay_match() {
         let tmp = TempDir::new().unwrap();
         let limits = Limits { max_log_bytes: u64::MAX, max_log_records: 4 };
-        let mut s = Store::open_with(tmp.path(), limits).unwrap();
+        let mut s = Store::open(tmp.path(), STRETCH, limits).unwrap();
         for n in 1..=14u64 {
             s.put_day(day(&format!("2026-09-{:02}", 10 + n % 5), n)).unwrap();
         }
@@ -526,12 +472,12 @@ mod tests {
         drop(s);
 
         assert!(tmp.path().join(SNAPSHOT).exists());
-        assert!(!tmp.path().join("days.log.4").exists());
-        assert!(tmp.path().join("days.log.8").exists());
-        assert!(tmp.path().join("days.log.12").exists());
+        assert!(!tmp.path().join("stretch.log.4").exists());
+        assert!(tmp.path().join("stretch.log.8").exists());
+        assert!(tmp.path().join("stretch.log.12").exists());
         assert_eq!(log_text(tmp.path()).lines().count(), 2);
 
-        let s = Store::open_with(tmp.path(), limits).unwrap();
+        let s = Store::open(tmp.path(), STRETCH, limits).unwrap();
         assert_eq!(s.days(), &expected);
         assert_eq!(s.seq(), 14);
     }
@@ -539,7 +485,7 @@ mod tests {
     #[test]
     fn crash_between_snapshot_and_rotation_replays_correctly() {
         let tmp = TempDir::new().unwrap();
-        let mut s = Store::open(tmp.path()).unwrap();
+        let mut s = open(tmp.path()).unwrap();
         s.put_day(day("2026-09-25", 1)).unwrap();
         s.put_day(day("2026-09-26", 2)).unwrap();
         let expected = s.days().clone();
@@ -548,7 +494,7 @@ mod tests {
         fs::write(tmp.path().join(SNAPSHOT), json!({ "seq": 2, "days": days }).to_string()).unwrap();
         drop(s);
 
-        let mut s = Store::open(tmp.path()).unwrap();
+        let mut s = open(tmp.path()).unwrap();
         assert_eq!(s.days(), &expected);
         assert_eq!(s.put_day(day("2026-09-27", 3)).unwrap(), 3);
     }
@@ -556,135 +502,32 @@ mod tests {
     #[test]
     fn missing_log_after_rotation_reads_as_empty() {
         let tmp = TempDir::new().unwrap();
-        let mut s = Store::open(tmp.path()).unwrap();
+        let mut s = open(tmp.path()).unwrap();
         s.put_day(day("2026-09-25", 1)).unwrap();
         s.checkpoint().unwrap();
         drop(s);
         fs::remove_file(tmp.path().join(LOG)).unwrap();
 
-        let mut s = Store::open(tmp.path()).unwrap();
+        let mut s = open(tmp.path()).unwrap();
         assert_eq!(s.days().len(), 1);
         assert_eq!(s.put_day(day("2026-09-26", 2)).unwrap(), 2);
-    }
-
-    #[test]
-    fn named_stores_keep_separate_files() {
-        let tmp = TempDir::new().unwrap();
-        let small = Limits { max_log_bytes: 1 << 20, max_log_records: 3 };
-        {
-            let mut days = Store::open(tmp.path()).unwrap();
-            let mut stretch = Store::open_named(tmp.path(), STRETCH, small).unwrap();
-            days.put_day(day("2026-10-04", 1)).unwrap();
-            for n in 1..=4 {
-                stretch.put_day(json!({ "date": "2026-10-04", "blocks": [{ "id": n }] })).unwrap();
-            }
-        }
-        // The stretch log checkpointed and rotated under its own name; days.log is untouched.
-        assert!(tmp.path().join("stretch.snapshot").exists());
-        assert!(tmp.path().join("stretch.log.3").exists());
-        assert!(!tmp.path().join(SNAPSHOT).exists());
-        assert_eq!(log_text(tmp.path()).lines().count(), 1);
-
-        let days = Store::open(tmp.path()).unwrap();
-        let stretch = Store::open_named(tmp.path(), STRETCH, small).unwrap();
-        assert_eq!(days.days()["2026-10-04"], day("2026-10-04", 1));
-        assert_eq!(stretch.days()["2026-10-04"]["blocks"][0]["id"], 4);
-        assert_eq!(stretch.seq(), 4);
     }
 
     #[test]
     fn seq_continues_across_restarts() {
         let tmp = TempDir::new().unwrap();
         {
-            let mut s = Store::open(tmp.path()).unwrap();
+            let mut s = open(tmp.path()).unwrap();
             s.put_day(day("2026-09-25", 1)).unwrap();
             s.put_day(day("2026-09-26", 2)).unwrap();
         }
         {
-            let mut s = Store::open(tmp.path()).unwrap();
+            let mut s = open(tmp.path()).unwrap();
             assert_eq!(s.put_day(day("2026-09-27", 3)).unwrap(), 3);
             s.checkpoint().unwrap(); // log is now empty; seq must come from the snapshot
         }
-        let mut s = Store::open(tmp.path()).unwrap();
+        let mut s = open(tmp.path()).unwrap();
         assert_eq!(s.seq(), 3);
         assert_eq!(s.put_day(day("2026-09-28", 4)).unwrap(), 4);
-    }
-
-    #[test]
-    fn game_round_trip() {
-        let tmp = TempDir::new().unwrap();
-        let mut s = Store::open(tmp.path()).unwrap();
-        assert_eq!(s.load_game().unwrap(), None);
-        s.put_game(&json!({ "total": 10 })).unwrap();
-        s.put_game(&json!({ "total": 20 })).unwrap();
-        assert_eq!(s.load_game().unwrap(), Some(json!({ "total": 20 })));
-        assert!(!tmp.path().join(GAME_TMP).exists());
-    }
-
-    fn seed() -> Value {
-        json!({
-            "exportedAt": "2026-10-03T01:40:00Z",
-            "source": "test",
-            "notes": "unknown keys are ignored",
-            "days": { "2026-09-25": day("2026-09-25", 1), "2026-09-26": day("2026-09-26", 2) },
-            "game": { "total": 8430 }
-        })
-    }
-
-    #[test]
-    fn migration_runs_once() {
-        let tmp = TempDir::new().unwrap();
-        let mut s = Store::open(tmp.path()).unwrap();
-        assert!(s.needs_import());
-        assert!(s.import_seed(Some(&seed())).unwrap());
-        let after_first = (s.days().clone(), s.seq());
-        assert!(!s.import_seed(Some(&seed())).unwrap());
-        drop(s);
-
-        let mut s = Store::open(tmp.path()).unwrap();
-        assert!(!s.needs_import());
-        assert!(!s.import_seed(Some(&seed())).unwrap());
-        assert_eq!((s.days().clone(), s.seq()), after_first);
-        assert_eq!(s.days().len(), 2);
-        assert_eq!(s.load_game().unwrap(), Some(json!({ "total": 8430 })));
-    }
-
-    #[test]
-    fn migration_does_not_overwrite_later_edits() {
-        let tmp = TempDir::new().unwrap();
-        let mut s = Store::open(tmp.path()).unwrap();
-        s.import_seed(Some(&seed())).unwrap();
-        s.put_day(day("2026-09-25", 99)).unwrap();
-        drop(s);
-        let mut s = Store::open(tmp.path()).unwrap();
-        s.import_seed(Some(&seed())).unwrap();
-        assert_eq!(s.days()["2026-09-25"], day("2026-09-25", 99));
-    }
-
-    #[test]
-    fn interrupted_migration_is_redone() {
-        let tmp = TempDir::new().unwrap();
-        {
-            // Crash after the first imported day: no marker, no snapshot.
-            let mut s = Store::open(tmp.path()).unwrap();
-            s.put_day(day("2026-09-25", 1)).unwrap();
-        }
-        let mut s = Store::open(tmp.path()).unwrap();
-        assert!(s.needs_import());
-        assert!(s.import_seed(Some(&seed())).unwrap());
-        assert_eq!(s.days().len(), 2);
-        assert!(!s.needs_import());
-    }
-
-    #[test]
-    fn no_seed_still_marks_import_done() {
-        let tmp = TempDir::new().unwrap();
-        let mut s = Store::open(tmp.path()).unwrap();
-        assert!(s.import_seed(None).unwrap());
-        assert!(s.days().is_empty());
-        drop(s);
-        let mut s = Store::open(tmp.path()).unwrap();
-        assert!(!s.import_seed(Some(&seed())).unwrap());
-        assert!(s.days().is_empty());
     }
 }

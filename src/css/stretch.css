@@ -1,8 +1,8 @@
-/* Stretch mode (prototype): black and white, a thin time axis, blocks in bright colours.
+/* Stretch: black and white, a thin time axis, blocks in bright colours.
    Time runs upwards. A block is translucent until its time is spent; the spent part turns solid
    from the bottom up as time passes. */
 
-body.mode-stretch{
+:root{
   --st-bg:#FFFFFF;
   --st-ink:#000000;
   --st-muted:rgba(0,0,0,.45);
@@ -14,7 +14,7 @@ body.mode-stretch{
   --st-past:#F0F0F0;     /* the background behind time already gone */
 }
 @media (prefers-color-scheme: dark){
-  :root:not([data-theme="light"]) body.mode-stretch{
+  :root:not([data-theme="light"]){
     --st-bg:#000000;
     --st-ink:#FFFFFF;
     --st-muted:rgba(255,255,255,.5);
@@ -24,7 +24,7 @@ body.mode-stretch{
     --st-past:#1C1C1C;
   }
 }
-:root[data-theme="dark"] body.mode-stretch{
+:root[data-theme="dark"]{
   --st-bg:#000000;
   --st-ink:#FFFFFF;
   --st-muted:rgba(255,255,255,.5);
@@ -34,13 +34,18 @@ body.mode-stretch{
   --st-past:#1C1C1C;
 }
 
-/* in stretch mode the page stops scrolling; the timeline scrolls inside the window instead */
-body.mode-stretch{
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0;padding:0}
+/* the page doesn't scroll; the timeline scrolls inside the window */
+body{
   background:var(--st-bg);color:var(--st-ink);
-  height:100vh;overflow:hidden;padding-top:20px;padding-bottom:16px;display:flex;flex-direction:column;
+  font-family:"Karla",ui-sans-serif,system-ui,sans-serif;font-size:16px;line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+  height:100vh;overflow:hidden;padding:20px 20px 16px;display:flex;flex-direction:column;
 }
-body.mode-stretch .wrap{display:none}
-body.mode-stretch button:focus-visible,body.mode-stretch input:focus-visible{outline-color:var(--st-ink)}
+button{font-family:inherit;cursor:pointer}
+button:focus-visible,input:focus-visible{outline:2px solid var(--st-ink);outline-offset:2px}
 
 .stretch{flex:1 1 auto;min-height:0;width:100%;max-width:560px;margin:0 auto;display:flex;flex-direction:column}
 .st-head{
@@ -106,7 +111,7 @@ body.mode-stretch button:focus-visible,body.mode-stretch input:focus-visible{out
   font-family:inherit;font-size:14px;font-weight:700;color:var(--st-on-teal);
   background:transparent;border:0;padding:1px 0;
 }
-body.mode-stretch .st-block:not(.started) .st-name{color:var(--st-ink)}
+.st-block:not(.started) .st-name{color:var(--st-ink)}
 .st-name::placeholder{color:inherit;opacity:.45;font-weight:400}
 .st-name:focus{outline:none;border-bottom:1px solid currentColor}
 /* the name stays out of the way: shown once given, edited after a double-click */

@@ -1,17 +1,13 @@
-//! The page's only way to reach storage and the tray. The store is the single writer.
+//! The page's only way to reach storage. The store is the single writer.
 
 use crate::store::Store;
-use crate::tray::{self, Status};
 use serde_json::{json, Value};
 use std::sync::Mutex;
-use tauri::{AppHandle, State};
+use tauri::State;
 
 /// `Err` holds the reason the store couldn't open (e.g. a corrupt log). Every command then
 /// reports it to the page instead of running on partial history.
 pub struct StoreState(pub Mutex<Result<Store, String>>);
-
-/// Stretch mode's own log, separate from the day history, with its own lock.
-pub struct StretchState(pub Mutex<Result<Store, String>>);
 
 fn with_store<T>(
     state: &Mutex<Result<Store, String>>,
@@ -22,41 +18,14 @@ fn with_store<T>(
     f(store).map_err(|e| e.to_string())
 }
 
+/// Every saved day, `{ "YYYY-MM-DD": {..} }`.
 #[tauri::command]
 pub fn load(state: State<'_, StoreState>) -> Result<Value, String> {
-    let r = with_store(&state.0, |s| Ok(json!({ "days": s.days(), "game": s.load_game()? })));
-    #[cfg(debug_assertions)]
-    eprintln!("stretch: load -> {}", match &r {
-        Ok(v) => format!("{} days", v["days"].as_object().map_or(0, |d| d.len())),
-        Err(e) => format!("error: {e}"),
-    });
-    r
-}
-
-#[tauri::command]
-pub fn put_day(state: State<'_, StoreState>, day: Value) -> Result<u64, String> {
-    with_store(&state.0, |s| s.put_day(day))
-}
-
-#[tauri::command]
-pub fn put_game(state: State<'_, StoreState>, game: Value) -> Result<(), String> {
-    with_store(&state.0, |s| s.put_game(&game))
-}
-
-/// Stretch mode's days, `{ "YYYY-MM-DD": {..} }`.
-#[tauri::command]
-pub fn stretch_load(state: State<'_, StretchState>) -> Result<Value, String> {
     with_store(&state.0, |s| Ok(json!(s.days())))
 }
 
+/// Log the full image of one day; returns its `seq` once it's on stable storage.
 #[tauri::command]
-pub fn stretch_put_day(state: State<'_, StretchState>, day: Value) -> Result<u64, String> {
+pub fn put_day(state: State<'_, StoreState>, day: Value) -> Result<u64, String> {
     with_store(&state.0, |s| s.put_day(day))
-}
-
-#[tauri::command]
-pub fn status(app: AppHandle, status: Status) {
-    #[cfg(debug_assertions)]
-    eprintln!("stretch: status {status:?}");
-    tray::set_status(&app, status);
 }

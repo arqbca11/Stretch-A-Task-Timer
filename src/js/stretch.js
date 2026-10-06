@@ -1,4 +1,4 @@
-// Stretch mode (prototype). A whole-day timeline that runs upwards: the morning is at the bottom
+// Stretch. A whole-day timeline that runs upwards: the morning is at the bottom
 // and later is higher up. Press and hold to place a block, pull its top edge up to change when
 // it ends. A block starts at the time it was placed: behind now it's already
 // going, ahead of now it begins by itself when the time comes. Its spent part turns solid as time
@@ -9,10 +9,10 @@
 // parallel the panel splits by those weights (drag the line between two to change the split);
 // where a block runs alone it takes the full width.
 //
-// Storage: Stretch mode has its own log, separate from the day history (`stretch.log` next to
-// `days.log`, same append/sync/recovery code). Each change writes the whole day, blocks and
-// tracks, as one record. Nothing reaches the tray and no rewards apply. Roll mode is untouched.
-import { dayKeyAt } from "./rules.js";
+// Storage: each change writes the whole day, blocks and tracks, as one record through the
+// bridge to an append-only log in Rust (`stretch.log`; see docs/storage.md). The page keeps no
+// other copy.
+import { dayKeyAt, dayBounds } from "./day.js";
 
 (function(){
   "use strict";
@@ -76,10 +76,6 @@ import { dayKeyAt } from "./rules.js";
   var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
   /* ---------- time <-> position: time runs upwards, so y counts down from the day's end ---------- */
-  function startOfDay(key){
-    var p = key.split("-");
-    return new Date(+p[0], +p[1]-1, +p[2], 4, 30).getTime();
-  }
   function yOf(ts){ return (dayEnd - ts) / MIN_MS * PX; }
   function tsAt(y){ return dayEnd - y / PX * MIN_MS; }
   function snapDown(ts){ var m = SNAP * MIN_MS; return dayStart + Math.floor((ts - dayStart) / m) * m; }
@@ -202,9 +198,9 @@ import { dayKeyAt } from "./rules.js";
   /* ---------- the day ---------- */
   function buildDay(){
     dayKey = dayKeyAt(Date.now());
-    dayStart = startOfDay(dayKey);
-    var next = new Date(dayStart); next.setDate(next.getDate() + 1);
-    dayEnd = next.getTime();
+    var bounds = dayBounds(dayKey);
+    dayStart = bounds.start;
+    dayEnd = bounds.end;
     day.style.height = yOf(dayStart) + "px";
     $("st-date").textContent = new Date(dayStart).toLocaleDateString(undefined,
       { weekday:"long", month:"long", day:"numeric" });
@@ -408,7 +404,7 @@ import { dayKeyAt } from "./rules.js";
       updatedAt: Date.now()
     };
     saved[dayKey] = doc;
-    window.switchcard.stretchPutDay(doc).catch(function(err){ say("Not saved: " + err); });
+    window.stretch.putDay(doc).catch(function(err){ say("Not saved: " + err); });
   }
 
   /* ---------- actions ---------- */
@@ -778,28 +774,20 @@ import { dayKeyAt } from "./rules.js";
     if (ended) persist();
   }
   setInterval(tick, 5000);
-  document.addEventListener("switchcard:visibility", tick);
+  document.addEventListener("stretch:visibility", tick);
 
-  /* ---------- mode switch (from the tray menu) ---------- */
-  function setMode(mode){
-    var stretch = mode === "stretch";
-    if (stretch === document.body.classList.contains("mode-stretch")) return;
-    document.body.classList.toggle("mode-stretch", stretch);
-    $("stretch").hidden = !stretch;
-    if (stretch) {
-      tick();
-      // now, two thirds of the way down, with the rest of the day above it
-      scroller.scrollTop = yOf(Date.now()) - scroller.clientHeight * 0.67;
-    }
-  }
-  window.switchcard.onMode(setMode);
-
-  window.switchcard.stretchLoad().then(function(days){
-    saved = days || {};
+  /* ---------- start ---------- */
+  // Show the day with now two thirds of the way down and the rest of the day above it.
+  function start(){
     buildDay();
+    scroller.scrollTop = yOf(Date.now()) - scroller.clientHeight * 0.67;
+  }
+  window.stretch.load().then(function(days){
+    saved = days || {};
+    start();
   }, function(err){
     storageDown = String(err);
-    buildDay();
-    $("st-msg").textContent = "Stretch storage unavailable: " + storageDown;
+    start();
+    $("st-msg").textContent = "Storage unavailable: " + storageDown;
   });
 })();

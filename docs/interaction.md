@@ -1,14 +1,18 @@
-# Stretch mode: design notes
+# Stretch: interaction design
 
-Design discussion and progress from 2026-10-04. Stretch mode is a second way to plan and track
-work, next to Roll mode. It is a prototype: its blocks are saved in their own log, and there are
-no rewards yet.
+How the timeline, the elastic pull and parallel blocks work, and how they got that way. Design
+discussion and progress from 2026-10-04 onwards. Storage has its own document,
+[storage.md](storage.md).
 
-Code: `src/js/stretch.js`, `src/css/stretch.css`. The tray menu items live in `src-tauri/src/tray.rs`.
+Code: `src/js/stretch.js`, `src/css/stretch.css`.
+
+Stretch began as a second mode ("Stretch mode") inside a Roll app, which picked a block's length
+with a die. Since 2026-10-05 it is the whole app; the Roll app is archived locally (see Legacy in
+CLAUDE.md). Rounds 1–10 below happened while it was still a mode.
 
 ## The idea
 
-Roll mode picks a block's length for you (a random 30–100). Stretch mode lets you shape it by
+The Roll app picked a block's length for you (a random 30–100). Stretch lets you shape it by
 hand. A block is a piece of rubber band on a day timeline: you place it, then pull it longer. It
 fills in as time passes. The starting point was a Figma sketch with four notes:
 
@@ -24,8 +28,7 @@ The numbers in the sketch are placeholders, not a spec.
 
 | Question | Decision |
 |---|---|
-| Replace the die? | No. Stretch is a second mode, and Roll mode is untouched. |
-| How do you switch modes? | Right-click the menu bar icon → *Roll mode* / *Stretch mode* (check items). There's no switch in the panel. *Roll a number* and *Keep going* switch back to Roll on their own. |
+| Replace the die? | At first no: Stretch was a second mode, switched from the menu bar menu. From 2026-10-05 Stretch is the only interface and the die is archived for reuse. |
 | Timeline | The whole logical day (4:30 am to 4:30 am), scrolling, at 1.6 px/min. Time runs **upwards**: 4:30 am at the bottom, later higher up. It opens with now two thirds of the way down, so the rest of the day is above. |
 | Look | Its own black-and-white palette (white background, black in dark mode). Blocks take bright colours in turn, starting with the sketch's teal (`#00C2CE`). No grid: a thin axis line with hour ticks and labels. Now is a dot on the axis with the time beside it, and the part of the day already gone has a light grey background. |
 | Where does a block start? | At the time you place it. Behind now, it's already going. Ahead of now, it starts by itself when its time comes. There's no Start button. |
@@ -74,6 +77,9 @@ Each round was built, installed and tried in the menu bar panel.
 10. **Now as a dot.** The line across the lane is gone. Now is a black dot on the axis with
     the time beside it, and the time already gone (below it) has a light grey background
     (`#F0F0F0`, `#1C1C1C` in dark mode).
+11. **Stretch is the app.** Roll mode, the die, Tetris rewards and the mode items in the menu
+    were removed (archived locally). The panel opens straight into the timeline. New icon: two
+    parallel blocks, solid up to now.
 
 ## Current behaviour
 
@@ -130,21 +136,13 @@ track  { id, w }                                               left-to-right ord
 
 ## Storage
 
-Stretch mode has its own log, separate from the day history: `stretch.log`, `stretch.snapshot`
-and rotated `stretch.log.<seq>` files, next to `days.log` in the app's data directory. It is the
-same `Store` code under another name (`Store::open_named`), so it keeps the same rules: append
-then fsync, torn-tail recovery, and checkpoint with rotation. It has its own lock
-(`StretchState`) and two commands, `stretch_load` and `stretch_put_day`.
-
-- **One record per day:** `{ date, blocks: [{ id, task, track, start, plan, created, end, color }],
-  tracks: [{ id, w }], updatedAt }`. Writes go through the bridge's ordered queue.
-- **When it's written:** after placing a block (on release), pulling an edge, moving the start
-  edge, dragging a split, renaming, *Done* and *Remove*.
-- **Outcomes, not inputs:** when a block ends because the next block in its track began, its
-  `end` is written into the record at that moment. A later change to the rules then doesn't
-  rewrite history.
-- **On startup** the page loads all Stretch days and shows today's. If the log can't be read, the
-  panel says so and makes no writes.
+Each change writes the whole day, `{ date, blocks: [{ id, task, track, start, plan, created,
+end, color }], tracks: [{ id, w }], updatedAt }`, as one record in an append-only log. It's
+written after placing a block (on release), pulling an edge, moving the start edge, dragging a
+split, renaming, *Done* and *Remove*, and when a block's end is first determined (the next
+block in its track began), so the log keeps that outcome rather than re-deriving it. On startup
+the page loads every day and shows today's; if the log can't be read, it says so and makes no
+writes. The design is in [storage.md](storage.md).
 
 ## Tunables
 
@@ -159,13 +157,13 @@ MIN_COL 44
 
 ## Open questions and next steps
 
-- **Merging with the day history.** Stretch has its own log for now (see Storage). Before
-  merging, decide whether the existing day entries (`startedAt`, `planned`, `worked`) need a
-  track field, and how parallel time counts.
-- **Rewards.** Deferred. Undecided whether a stretched plan earns like a rolled one, and how
-  parallel blocks count.
-- **Menu bar title.** It shows only Roll blocks. With parallel blocks, decide what it should
-  show.
+- **Earlier days.** Only today is shown. Past days are in the log but have no view yet.
+- **Rewards.** Deferred. Undecided whether stretching earns anything, and how parallel blocks
+  count. The Roll app's reward rules and Tetris game are archived if they're wanted back.
+- **Menu bar title.** The icon shows nothing about running blocks. With parallel blocks,
+  decide what it should show (the Roll app's title ticker is archived).
+- **A die for new blocks?** The archived die renderer could appear during the press-and-hold,
+  for example to pick a length.
 - **Track reuse.** Holding on a block reuses an earlier, free extra track with its old weight,
   so the split isn't always exactly `1/(n+1)`.
 - **Stretching interactions.** These are the eventual reason for the name and haven't been

@@ -3,6 +3,7 @@ src-tauri/target/
 src-tauri/gen/
 .DS_Store
 
-# Personal history: imported on first launch, never committed.
-reference/seed-export.json
-src-tauri/resources/seed-export.json
+# The Roll app (die, block timer, Tetris rewards) and its personal history, kept locally for
+# reference and reuse; see "Legacy" in CLAUDE.md.
+legacy/
+seed-export.json
