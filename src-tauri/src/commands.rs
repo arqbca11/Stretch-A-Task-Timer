@@ -10,15 +10,21 @@ use tauri::{AppHandle, State};
 /// reports it to the page instead of running on partial history.
 pub struct StoreState(pub Mutex<Result<Store, String>>);
 
-fn with_store<T>(state: &StoreState, f: impl FnOnce(&mut Store) -> crate::store::Result<T>) -> Result<T, String> {
-    let mut guard = state.0.lock().map_err(|_| "storage lock poisoned".to_string())?;
+/// Stretch mode's own log, separate from the day history, with its own lock.
+pub struct StretchState(pub Mutex<Result<Store, String>>);
+
+fn with_store<T>(
+    state: &Mutex<Result<Store, String>>,
+    f: impl FnOnce(&mut Store) -> crate::store::Result<T>,
+) -> Result<T, String> {
+    let mut guard = state.lock().map_err(|_| "storage lock poisoned".to_string())?;
     let store = guard.as_mut().map_err(|e| e.clone())?;
     f(store).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn load(state: State<'_, StoreState>) -> Result<Value, String> {
-    let r = with_store(&state, |s| Ok(json!({ "days": s.days(), "game": s.load_game()? })));
+    let r = with_store(&state.0, |s| Ok(json!({ "days": s.days(), "game": s.load_game()? })));
     #[cfg(debug_assertions)]
     eprintln!("stretch: load -> {}", match &r {
         Ok(v) => format!("{} days", v["days"].as_object().map_or(0, |d| d.len())),
@@ -29,12 +35,23 @@ pub fn load(state: State<'_, StoreState>) -> Result<Value, String> {
 
 #[tauri::command]
 pub fn put_day(state: State<'_, StoreState>, day: Value) -> Result<u64, String> {
-    with_store(&state, |s| s.put_day(day))
+    with_store(&state.0, |s| s.put_day(day))
 }
 
 #[tauri::command]
 pub fn put_game(state: State<'_, StoreState>, game: Value) -> Result<(), String> {
-    with_store(&state, |s| s.put_game(&game))
+    with_store(&state.0, |s| s.put_game(&game))
+}
+
+/// Stretch mode's days, `{ "YYYY-MM-DD": {..} }`.
+#[tauri::command]
+pub fn stretch_load(state: State<'_, StretchState>) -> Result<Value, String> {
+    with_store(&state.0, |s| Ok(json!(s.days())))
+}
+
+#[tauri::command]
+pub fn stretch_put_day(state: State<'_, StretchState>, day: Value) -> Result<u64, String> {
+    with_store(&state.0, |s| s.put_day(day))
 }
 
 #[tauri::command]

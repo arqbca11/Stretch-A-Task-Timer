@@ -1,7 +1,8 @@
 # Stretch mode: design notes
 
 Design discussion and progress from 2026-10-04. Stretch mode is a second way to plan and track
-work, next to Roll mode. It is a prototype: nothing is saved yet, and there are no rewards.
+work, next to Roll mode. It is a prototype: its blocks are saved in their own log, and there are
+no rewards yet.
 
 Code: `src/js/stretch.js`, `src/css/stretch.css`. The tray menu items live in `src-tauri/src/tray.rs`.
 
@@ -25,8 +26,8 @@ The numbers in the sketch are placeholders, not a spec.
 |---|---|
 | Replace the die? | No. Stretch is a second mode, and Roll mode is untouched. |
 | How do you switch modes? | Right-click the menu bar icon → *Roll mode* / *Stretch mode* (check items). There's no switch in the panel. *Roll a number* and *Keep going* switch back to Roll on their own. |
-| Timeline | The whole logical day (4:30 am to 4:30 am), scrolling, at 1.6 px/min. It opens with now a third of the way down. |
-| Look | Its own black-and-white palette (white background, black in dark mode) with one teal (`#00C2CE`, from the sketch). No grid: a thin axis line, hour ticks and labels, and a thin now line. |
+| Timeline | The whole logical day (4:30 am to 4:30 am), scrolling, at 1.6 px/min. Time runs **upwards**: 4:30 am at the bottom, later higher up. It opens with now two thirds of the way down, so the rest of the day is above. |
+| Look | Its own black-and-white palette (white background, black in dark mode). Blocks take bright colours in turn, starting with the sketch's teal (`#00C2CE`). No grid: a thin axis line with hour ticks and labels. Now is a dot on the axis with the time beside it, and the part of the day already gone has a light grey background. |
 | Where does a block start? | At the time you place it. Behind now, it's already going. Ahead of now, it starts by itself when its time comes. There's no Start button. |
 | Rewards | Deferred until blocks and pulling feel right. |
 
@@ -64,24 +65,35 @@ Each round was built, installed and tried in the menu bar panel.
 7. **Hover label, right-click menu, centred name.** Start time and length moved into a label
    that follows the pointer. *Done* and *Remove* moved into a right-click menu. The name sits in
    the middle of the block.
+8. **A colour per block.** Each new block takes the next colour in a ring of nine bright ones
+   (teal, hot pink, orange, electric blue, lemon, violet, mint, coral, lime), so two blocks
+   placed one after another never match. The hold ring fills in the colour that's coming.
+9. **Time runs upwards.** The axis is flipped: a block starts at its bottom edge, you stretch it
+   by pulling up, and it fills from the bottom up as time passes. Rounds 1–8 above describe the
+   downward version; the top/bottom edges in them are swapped now.
+10. **Now as a dot.** The line across the lane is gone. Now is a black dot on the axis with
+    the time beside it, and the time already gone (below it) has a light grey background
+    (`#F0F0F0`, `#1C1C1C` in dark mode).
 
 ## Current behaviour
 
 - **Create:** press and hold for 400 ms; moving more than 6 px first cancels. A 30-min block pops
   in, centred on the pointer. A press at or after now starts no earlier than now, so "hold at
-  the now line" means "start this now". Keep holding and pull down to stretch it.
-- **Bottom edge (elastic):**
+  the now line" means "start this now". Keep holding and pull up to stretch it.
+- **Top edge = the end (elastic):**
   - Target length = `base + TENSION·ln(1 + reach/TENSION)`, where `reach` is the pointer travel
-    since taking hold. Pulling back up is 1:1.
+    since taking hold. Pulling back down is 1:1.
   - The edge follows the target on a spring (`FOLLOW_K/C`), so it lags and overshoots.
   - Past the limits (10 min, 180 min, the next block in the same track) the edge gives at most
     36 px.
   - A band connects the edge to the pointer, and the block narrows under tension.
   - On release, the length snaps to a 5-minute step and springs there (`SPRING_K/C`), starting
     from the edge's current speed.
-- **Top edge (rigid):** drag it to change the start 1:1 in 5-minute steps. The end stays fixed,
+- **Bottom edge = the start (rigid):** drag it to change the start 1:1 in 5-minute steps. The end stays fixed,
   and it can't go into the previous block in its track.
-- **Fill:** the spent part is solid teal and the rest is translucent. The fill grows every 5 s
+- **Colour:** each block gets the next colour after the last block placed (`PALETTE` in
+  `stretch.js`). Black text reads on all of them.
+- **Fill:** the spent part is solid colour, from the bottom up, and the rest is translucent. The fill grows every 5 s
   with a 1 s ease. A block not yet started is all translucent.
 - **Name:** hidden until you double-click the block. Then it's edited in place, centred, and
   shown as bold text.
@@ -92,7 +104,8 @@ Each round was built, installed and tried in the menu bar panel.
 ## The model
 
 ```
-block  { id, task, track, start, plan (min), created, end }   end is set only by Done
+block  { id, task, track, start, plan (min), created, end, color }
+                                         end is set only by Done; color indexes PALETTE
 track  { id, w }                                               left-to-right order, width weight
 ```
 
@@ -115,6 +128,24 @@ track  { id, w }                                               left-to-right ord
   column can go narrower than 44 px.
 - **Empty tracks** are removed.
 
+## Storage
+
+Stretch mode has its own log, separate from the day history: `stretch.log`, `stretch.snapshot`
+and rotated `stretch.log.<seq>` files, next to `days.log` in the app's data directory. It is the
+same `Store` code under another name (`Store::open_named`), so it keeps the same rules: append
+then fsync, torn-tail recovery, and checkpoint with rotation. It has its own lock
+(`StretchState`) and two commands, `stretch_load` and `stretch_put_day`.
+
+- **One record per day:** `{ date, blocks: [{ id, task, track, start, plan, created, end, color }],
+  tracks: [{ id, w }], updatedAt }`. Writes go through the bridge's ordered queue.
+- **When it's written:** after placing a block (on release), pulling an edge, moving the start
+  edge, dragging a split, renaming, *Done* and *Remove*.
+- **Outcomes, not inputs:** when a block ends because the next block in its track began, its
+  `end` is written into the record at that moment. A later change to the rules then doesn't
+  rewrite history.
+- **On startup** the page loads all Stretch days and shows today's. If the log can't be read, the
+  panel says so and makes no writes.
+
 ## Tunables
 
 At the top of `src/js/stretch.js`:
@@ -128,10 +159,9 @@ MIN_COL 44
 
 ## Open questions and next steps
 
-- **Storage.** Stretch blocks live in memory only. Before they're saved, decide how they map
-  onto the day log: whether the existing day entries (`startedAt`, `planned`, `worked`) need a
-  track field, and how parallel time counts. The "outcomes, not inputs" rule in `CLAUDE.md`
-  still applies.
+- **Merging with the day history.** Stretch has its own log for now (see Storage). Before
+  merging, decide whether the existing day entries (`startedAt`, `planned`, `worked`) need a
+  track field, and how parallel time counts.
 - **Rewards.** Deferred. Undecided whether a stretched plan earns like a rolled one, and how
   parallel blocks count.
 - **Menu bar title.** It shows only Roll blocks. With parallel blocks, decide what it should

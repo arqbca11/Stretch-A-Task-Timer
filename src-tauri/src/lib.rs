@@ -2,7 +2,7 @@ mod commands;
 mod store;
 mod tray;
 
-use commands::StoreState;
+use commands::{StoreState, StretchState};
 use std::sync::Mutex;
 use tauri::path::BaseDirectory;
 use tauri::{App, Manager, WindowEvent};
@@ -45,6 +45,18 @@ pub fn run() {
                 eprintln!("stretch: storage unavailable: {e}");
             }
             app.manage(StoreState(Mutex::new(store)));
+            let stretch = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| e.to_string())
+                .and_then(|dir| {
+                    store::Store::open_named(dir, store::STRETCH, store::Limits::default())
+                        .map_err(|e| e.to_string())
+                });
+            if let Err(e) = &stretch {
+                eprintln!("stretch: stretch-mode storage unavailable: {e}");
+            }
+            app.manage(StretchState(Mutex::new(stretch)));
             tray::setup(app.handle())?;
             Ok(())
         })
@@ -61,7 +73,9 @@ pub fn run() {
             commands::load,
             commands::put_day,
             commands::put_game,
-            commands::status
+            commands::status,
+            commands::stretch_load,
+            commands::stretch_put_day
         ])
         .run(tauri::generate_context!())
         .expect("error while running Stretch");

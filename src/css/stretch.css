@@ -1,5 +1,6 @@
-/* Stretch mode (prototype): black and white, a thin time axis, teal blocks.
-   A block is translucent until its time is spent; the spent part turns solid as time passes. */
+/* Stretch mode (prototype): black and white, a thin time axis, blocks in bright colours.
+   Time runs upwards. A block is translucent until its time is spent; the spent part turns solid
+   from the bottom up as time passes. */
 
 body.mode-stretch{
   --st-bg:#FFFFFF;
@@ -8,7 +9,9 @@ body.mode-stretch{
   --st-line:rgba(0,0,0,.85);
   --st-teal:#00C2CE;
   --st-teal-ghost:rgba(0,194,206,.28);
+  --st-ghost-a:.28;      /* how solid a block's unspent part is */
   --st-on-teal:#000000;
+  --st-past:#F0F0F0;     /* the background behind time already gone */
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]) body.mode-stretch{
@@ -17,6 +20,8 @@ body.mode-stretch{
     --st-muted:rgba(255,255,255,.5);
     --st-line:rgba(255,255,255,.85);
     --st-teal-ghost:rgba(0,194,206,.32);
+    --st-ghost-a:.34;
+    --st-past:#1C1C1C;
   }
 }
 :root[data-theme="dark"] body.mode-stretch{
@@ -25,6 +30,8 @@ body.mode-stretch{
   --st-muted:rgba(255,255,255,.5);
   --st-line:rgba(255,255,255,.85);
   --st-teal-ghost:rgba(0,194,206,.32);
+  --st-ghost-a:.34;
+  --st-past:#1C1C1C;
 }
 
 /* in stretch mode the page stops scrolling; the timeline scrolls inside the window instead */
@@ -61,25 +68,30 @@ body.mode-stretch button:focus-visible,body.mode-stretch input:focus-visible{out
   cursor:crosshair;touch-action:none;-webkit-user-select:none;user-select:none;
 }
 
-.st-now{position:absolute;left:-4px;right:0;height:0;border-top:1px solid var(--st-ink);z-index:3;pointer-events:none}
+/* now: a dot on the axis with the time beside it; no line across the lane */
+.st-now{position:absolute;left:0;width:0;height:0;z-index:3;pointer-events:none}
 .st-now::before{
-  content:"";position:absolute;left:-3px;top:-4px;width:7px;height:7px;border-radius:50%;background:var(--st-ink);
+  content:"";position:absolute;left:-4px;top:-4px;width:7px;height:7px;border-radius:50%;background:var(--st-ink);
 }
+/* the time already gone, from the start of the day up to now */
+.st-past{position:absolute;left:0;right:0;bottom:0;background:var(--st-past);pointer-events:none}
 .st-now span{     /* in the axis gutter, over the hour labels, clear of the blocks */
   position:absolute;right:100%;top:-8px;margin-right:6px;padding-left:4px;
   font-size:10px;font-weight:700;line-height:16px;color:var(--st-ink);background:var(--st-bg);
   font-variant-numeric:tabular-nums;white-space:nowrap;
 }
 
-/* a block: the ghost is the time still ahead; the solid fill is time spent, and it grows */
+/* a block: the ghost is the time still ahead; the solid fill is time spent, and it grows.
+   Each block's colour comes in as --st-c ("r,g,b"), set inline from the palette in stretch.js. */
+.st-block,.st-band,.st-press{--st-c:0,194,206}
 .st-block{
   position:absolute;z-index:2;cursor:default;   /* left and width are set inline, per column */
-  background:var(--st-teal-ghost);
-  box-shadow:inset 0 1px 0 var(--st-bg);   /* a hairline between back-to-back blocks */
+  background:rgba(var(--st-c),var(--st-ghost-a));
+  box-shadow:inset 0 -1px 0 var(--st-bg);   /* a hairline between back-to-back blocks */
 }
 .st-fill{
-  position:absolute;left:0;right:0;top:1px;pointer-events:none;
-  background:var(--st-teal);
+  position:absolute;left:0;right:0;bottom:1px;pointer-events:none;
+  background:rgb(var(--st-c));
   transition:height 1s linear;
 }
 .st-block.pulling .st-fill{transition:none}
@@ -120,12 +132,12 @@ body.mode-stretch .st-block:not(.started) .st-name{color:var(--st-ink)}
 }
 .st-menu button:hover,.st-menu button:focus-visible{background:var(--st-teal-ghost);opacity:1;outline:none}
 
-/* the edges: invisible grab zones. The bottom one stretches; the top one moves the start. */
+/* the edges: invisible grab zones. The top one (the end) stretches; the bottom one moves the start. */
 .st-handle{
   position:absolute;left:0;right:0;height:16px;margin-top:-8px;z-index:3;
   cursor:ns-resize;touch-action:none;
 }
-.st-handle.top{top:0;height:10px;margin-top:-5px}
+.st-handle.start{top:auto;bottom:0;height:10px;margin:0 0 -5px}
 
 /* a new block shows no name field until it's been placed */
 .st-block.fresh .st-body{visibility:hidden}
@@ -142,16 +154,16 @@ body.mode-stretch .st-block:not(.started) .st-name{color:var(--st-ink)}
 /* press and hold: the ring fills, then the block appears */
 .st-press{
   position:absolute;width:30px;height:30px;margin:-15px 0 0 -15px;border-radius:50%;
-  border:2px solid var(--st-teal);pointer-events:none;z-index:6;
+  border:2px solid rgb(var(--st-c));pointer-events:none;z-index:6;
   animation-name:st-charge;animation-timing-function:linear;animation-fill-mode:forwards;
 }
 @keyframes st-charge{
   from{transform:scale(.25);opacity:.3}
-  to{transform:scale(1);opacity:1;background:var(--st-teal-ghost)}
+  to{transform:scale(1);opacity:1;background:rgba(var(--st-c),var(--st-ghost-a))}
 }
 
 /* the band between the edge and the pointer while pulling */
-.st-band{position:absolute;z-index:4;pointer-events:none;background:var(--st-teal);border-radius:2px;transform-origin:50% 0}
+.st-band{position:absolute;z-index:4;pointer-events:none;background:rgb(var(--st-c));border-radius:2px;transform-origin:50% 100%}
 
 /* when the columns change (a block joins or leaves, a split moves), blocks slide to their new
    widths with a little bounce; under tension a block narrows, and springs back when let go */

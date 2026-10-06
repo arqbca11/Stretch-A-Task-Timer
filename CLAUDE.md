@@ -43,7 +43,8 @@ Read the reference file before changing behavior. Its comments explain most deci
 ```
 src/                       frontend, served as-is
   index.html               the ported page (starts as a copy of reference/switch-card.html)
-  js/bridge.js             defines window.switchcard = { load, putDay, putGame, status } over invoke,
+  js/bridge.js             defines window.switchcard = { load, putDay, putGame, status, stretchLoad,
+                           stretchPutDay } over invoke,
                            and forwards "tray-action" events to the page
   js/rules.js              pure functions shared with tests: rewardFor, dayKeyAt, idleBefore, carveIdle
   js/stretch.js            Stretch mode (prototype): day timeline, elastic blocks, parallel tracks
@@ -93,10 +94,10 @@ Tray menu actions go the other way: Rust emits `tray-action` with `done | keepGo
 
 ## Stretch mode (prototype)
 
-A second panel mode, switched from the tray menu: press and hold on a day timeline to place a
-block, pull it to stretch it, and run blocks in parallel columns. It has its own black/white/teal
-palette, scoped to `body.mode-stretch`; Roll mode's look is unchanged. Its blocks live in memory
-only (not in the day log), and no rewards apply yet. Design history, the model and open
+A second panel mode, switched from the tray menu: press and hold on a day timeline (time runs
+upwards) to place a block, pull it up to stretch it, and run blocks in parallel columns. It has its own black/white
+palette, with each new block in the next of nine bright colours, scoped to `body.mode-stretch`; Roll mode's look is unchanged. Its blocks are saved in
+their own log (`stretch.log`, below), not the day history, and no rewards apply yet. Design history, the model and open
 questions are in `docs/stretch-mode.md`. Read it before changing Stretch mode.
 
 ## Storage: log + snapshot
@@ -108,7 +109,13 @@ Data directory: `app.path().app_data_dir()`
 days.log         append-only, one JSON record per line
 days.snapshot    last checkpoint: { "seq": N, "days": { "YYYY-MM-DD": {...} } }
 game.json        Tetris state, rewritten atomically
+stretch.log      Stretch mode's own log + stretch.snapshot, same format and rules
 ```
+
+Stretch mode uses the same `Store` code under another name (`Store::open_named(dir, "stretch", ..)`),
+with its own managed state and lock (`StretchState`) and its own commands (`stretch_load`,
+`stretch_put_day`). Each record is a whole Stretch day: `{ date, blocks, tracks, updatedAt }`.
+It is kept apart from the day history until we decide how parallel blocks map onto it.
 
 **Records are whole-day images** (physical logging), not fine-grained operations:
 

@@ -1,5 +1,6 @@
-// Stretch mode (prototype). A whole-day timeline: press and hold to place a block, pull its bottom
-// edge to change when it ends. A block starts at the time it was placed: behind now it's already
+// Stretch mode (prototype). A whole-day timeline that runs upwards: the morning is at the bottom
+// and later is higher up. Press and hold to place a block, pull its top edge up to change when
+// it ends. A block starts at the time it was placed: behind now it's already
 // going, ahead of now it begins by itself when the time comes. Its spent part turns solid as time
 // passes.
 //
@@ -8,8 +9,9 @@
 // parallel the panel splits by those weights (drag the line between two to change the split);
 // where a block runs alone it takes the full width.
 //
-// Blocks live in memory only for now: nothing is written to the day log, nothing reaches the
-// tray, and no rewards apply. Roll mode is untouched.
+// Storage: Stretch mode has its own log, separate from the day history (`stretch.log` next to
+// `days.log`, same append/sync/recovery code). Each change writes the whole day, blocks and
+// tracks, as one record. Nothing reaches the tray and no rewards apply. Roll mode is untouched.
 import { dayKeyAt } from "./rules.js";
 
 (function(){
@@ -35,31 +37,51 @@ import { dayKeyAt } from "./rules.js";
   var MIN_COL = 44;                 // px: the narrowest a parallel column can be dragged
   var PAD_L = 12, PAD_R = 8, GUTTER = 4;   // px: lane padding and the gap between parallel columns
 
+  // Each new block takes the next colour in this ring, so no two blocks in a row match. Bright
+  // enough that black text reads on all of them. Stored as "r,g,b" for rgb()/rgba() in the CSS.
+  var PALETTE = [
+    "0,194,206",    // teal
+    "255,61,139",   // hot pink
+    "255,138,0",    // orange
+    "61,123,255",   // electric blue
+    "255,214,10",   // lemon
+    "163,91,255",   // violet
+    "46,229,157",   // mint
+    "255,90,78",    // coral
+    "126,211,33"    // lime
+  ];
+
   var MIN_MS = 60000;
-  // Blocks: { id, task, track, start, plan (min), created, end }, times in ms; `end` is set only
-  // by Done. Tracks: { id, w }, in left-to-right order; `w` is a width weight.
+  // Blocks: { id, task, track, start, plan (min), created, end, color }, times in ms; `end` is
+  // set only by Done; `color` is an index into PALETTE. Tracks: { id, w }, in left-to-right order; `w` is a width weight.
   var blocks = [], tracks = [];
   var clusters = [];  // groups of blocks that overlap in time, from the last arrange()
   var dayKey = null, dayStart = 0, dayEnd = 0;
-  var pull = null;   // the bottom edge being pulled
+  var pull = null;   // the end edge (on top) being pulled
   var press = null;  // a press that becomes a block if it's held
-  var move = null;   // the top edge being moved
+  var move = null;   // the start edge (at the bottom) being moved
   var split = null;  // the line between two parallel columns being dragged
   var nextId = 1;
   var msgTimer = null;
+  var saved = {};      // the days as loaded and since written, by date
+  var storageDown = null;   // why the stretch log couldn't load; nothing is written then
 
   function $(id){ return document.getElementById(id); }
   var scroller = $("st-scroll"), day = $("st-day"), lane = $("st-lane"), axis = $("st-axis");
   var nowLine = $("st-now");
+  // The part of the day already gone (below now, since time runs up) has a grey background.
+  var past = document.createElement("div");
+  past.className = "st-past";
+  lane.prepend(past);
   var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
-  /* ---------- time <-> position ---------- */
+  /* ---------- time <-> position: time runs upwards, so y counts down from the day's end ---------- */
   function startOfDay(key){
     var p = key.split("-");
     return new Date(+p[0], +p[1]-1, +p[2], 4, 30).getTime();
   }
-  function yOf(ts){ return (ts - dayStart) / MIN_MS * PX; }
-  function tsAt(y){ return dayStart + y / PX * MIN_MS; }
+  function yOf(ts){ return (dayEnd - ts) / MIN_MS * PX; }
+  function tsAt(y){ return dayEnd - y / PX * MIN_MS; }
   function snapDown(ts){ var m = SNAP * MIN_MS; return dayStart + Math.floor((ts - dayStart) / m) * m; }
   function snapUp(ts){ var m = SNAP * MIN_MS; return dayStart + Math.ceil((ts - dayStart) / m) * m; }
   function clock(ts){ return new Date(ts).toLocaleTimeString(undefined, { hour:"numeric", minute:"2-digit" }); }
@@ -168,8 +190,8 @@ import { dayKeyAt } from "./rules.js";
         var el = document.createElement("div");
         el.className = "st-split";
         el.title = "Drag to change the split";
-        el.style.top = yOf(c.from) + "px";
-        el.style.height = (yOf(c.to) - yOf(c.from)) + "px";
+        el.style.top = yOf(c.to) + "px";
+        el.style.height = (yOf(c.from) - yOf(c.to)) + "px";
         el.style.left = (c.cols[i].x1 - 5) + "px";
         el.addEventListener("pointerdown", grabSplit.bind(null, c.cols[i], c.cols[i + 1]));
         lane.append(el);
@@ -183,7 +205,7 @@ import { dayKeyAt } from "./rules.js";
     dayStart = startOfDay(dayKey);
     var next = new Date(dayStart); next.setDate(next.getDate() + 1);
     dayEnd = next.getTime();
-    day.style.height = yOf(dayEnd) + "px";
+    day.style.height = yOf(dayStart) + "px";
     $("st-date").textContent = new Date(dayStart).toLocaleDateString(undefined,
       { weekday:"long", month:"long", day:"numeric" });
 
@@ -194,9 +216,16 @@ import { dayKeyAt } from "./rules.js";
       label.style.top = yOf(t) + "px";
       axis.appendChild(label);
     }
-    // A new day starts with an empty timeline.
-    blocks.forEach(function(b){ if (b.el && (b.start < dayStart || b.start >= dayEnd)) b.el.root.remove(); });
-    blocks = blocks.filter(function(b){ return b.start >= dayStart && b.start < dayEnd; });
+    // Show this day as saved (a new day starts empty).
+    blocks.forEach(function(b){ if (b.el) b.el.root.remove(); });
+    var doc = saved[dayKey] || {};
+    blocks = (doc.blocks || []).map(function(b){
+      return { id: b.id, task: b.task || "", track: b.track, start: b.start, plan: b.plan,
+               created: b.created, end: b.end == null ? null : b.end,
+               color: (b.color == null ? b.id - 1 : b.color) % PALETTE.length };
+    });
+    tracks = (doc.tracks || []).map(function(t){ return { id: t.id, w: t.w }; });
+    blocks.concat(tracks).forEach(function(o){ nextId = Math.max(nextId, o.id + 1); });
     pruneTracks();
     render();
   }
@@ -227,6 +256,7 @@ import { dayKeyAt } from "./rules.js";
     b.state = stateOf(b, now);
     var root = document.createElement("div");
     root.className = "st-block " + b.state + (b.state === "ahead" ? "" : " started");
+    root.style.setProperty("--st-c", PALETTE[b.color]);
     var fill = document.createElement("div"); fill.className = "st-fill";
     var body = document.createElement("div"); body.className = "st-body";
     var name = document.createElement("input");
@@ -238,8 +268,10 @@ import { dayKeyAt } from "./rules.js";
     name.classList.toggle("blank", !b.task);
     name.addEventListener("input", function(){ b.task = name.value; });
     name.addEventListener("keydown", function(e){ if (e.key === "Enter" || e.key === "Escape") name.blur(); });
+    name.addEventListener("focus", function(){ name.dataset.was = b.task; });
     name.addEventListener("blur", function(){
       b.task = name.value.trim();
+      if (b.task !== name.dataset.was) persist();
       name.value = b.task;
       name.readOnly = true;
       name.classList.toggle("blank", !b.task);
@@ -262,13 +294,13 @@ import { dayKeyAt } from "./rules.js";
     if (b.state !== "done") {
       handle = document.createElement("div");
       handle.className = "st-handle";
-      handle.title = "Pull to change when it ends";
+      handle.title = "Pull up to change when it ends";
       handle.addEventListener("pointerdown", function(e){ grabHandle(b, e); });
-      var topEdge = document.createElement("div");
-      topEdge.className = "st-handle top";
-      topEdge.title = "Drag to change when it starts";
-      topEdge.addEventListener("pointerdown", function(e){ grabTop(b, e); });
-      root.append(handle, topEdge);
+      var startEdge = document.createElement("div");
+      startEdge.className = "st-handle start";
+      startEdge.title = "Drag to change when it starts";
+      startEdge.addEventListener("pointerdown", function(e){ grabStart(b, e); });
+      root.append(handle, startEdge);
     }
     b.el = { root: root, fill: fill, name: name, handle: handle };
     lane.append(root);
@@ -298,12 +330,12 @@ import { dayKeyAt } from "./rules.js";
     }
     var col = b.col || { left: PAD_L, width: lane.clientWidth - PAD_L - PAD_R };
     var inset = Math.min(b.inset || 0, col.width * 0.15);   // squeezed while it's being pulled
-    r.root.style.top = yOf(b.start) + "px";
+    r.root.style.top = (yOf(b.start) - height) + "px";   // it starts at the bottom and grows up
     r.root.style.height = height + "px";
     r.root.style.left = (col.left + inset) + "px";
     r.root.style.width = Math.max(8, col.width - 2 * inset) + "px";
     r.fill.style.height = solid + "px";
-    if (r.handle) r.handle.style.top = planPx + "px";
+    if (r.handle) r.handle.style.top = (height - planPx) + "px";   // the planned end, which overrun passes
 
   }
 
@@ -361,6 +393,24 @@ import { dayKeyAt } from "./rules.js";
     if (menu && !menu.contains(e.target)) closeMenu();
   }, true);
 
+  /* ---------- storage ---------- */
+  // Write the whole day: its blocks (data only) and its tracks. Writes are queued in order by
+  // the bridge, so the last one is the day as it stands.
+  function persist(){
+    if (storageDown) return;
+    var doc = {
+      date: dayKey,
+      blocks: blocks.map(function(b){
+        return { id: b.id, task: b.task, track: b.track, start: b.start, plan: b.plan,
+                 created: b.created, end: b.end, color: b.color };
+      }),
+      tracks: tracks.map(function(t){ return { id: t.id, w: t.w }; }),
+      updatedAt: Date.now()
+    };
+    saved[dayKey] = doc;
+    window.switchcard.stretchPutDay(doc).catch(function(err){ say("Not saved: " + err); });
+  }
+
   /* ---------- actions ---------- */
   function say(text){
     var el = $("st-msg");
@@ -373,7 +423,7 @@ import { dayKeyAt } from "./rules.js";
   // when it's full a 30-minute block appears centred on it. Keep holding and pull it longer.
   // There's no pointer capture during the hold, so a quick double-click still reaches the block.
   lane.addEventListener("pointerdown", function(e){
-    if (e.button !== 0 || pull || press || move || split) return;
+    if (e.button !== 0 || pull || press || move || split || storageDown) return;
     if (e.target.closest("button, .st-handle, .st-split, .st-menu")) return;
     if (e.target.matches(".st-name:not([readonly])")) return;
     e.preventDefault();
@@ -384,10 +434,18 @@ import { dayKeyAt } from "./rules.js";
     ring.style.left = (e.clientX - box.left) + "px";
     ring.style.top = (e.clientY - box.top) + "px";
     ring.style.animationDuration = HOLD_MS + "ms";
+    ring.style.setProperty("--st-c", PALETTE[nextColor()]);   // the colour the block will be
     lane.append(ring);
     press = { pointer: e.pointerId, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY,
               ring: ring, timer: setTimeout(placeBlock, HOLD_MS) };
   });
+
+  // The colour after the most recently placed block's.
+  function nextColor(){
+    var last = null;
+    blocks.forEach(function(b){ if (!last || b.created > last.created) last = b; });
+    return last ? (last.color + 1) % PALETTE.length : 0;
+  }
 
   function cancelPress(){
     if (!press) return;
@@ -453,7 +511,8 @@ import { dayKeyAt } from "./rules.js";
     }
     if (!track) track = newTrack(start0, start0 + DEFAULT_PLAN * MIN_MS);
 
-    var b = { id: nextId++, task: "", track: track.id, start: start, plan: DEFAULT_PLAN, created: now, end: null };
+    var b = { id: nextId++, task: "", track: track.id, start: start, plan: DEFAULT_PLAN, created: now, end: null,
+              color: nextColor() };
     var room = roomAfter(b);
     if (room < MIN_PLAN) { pruneTracks(); say("No room for a block here."); return; }
     b.plan = Math.min(DEFAULT_PLAN, room);
@@ -472,6 +531,7 @@ import { dayKeyAt } from "./rules.js";
   function finish(b){
     b.end = Date.now();
     render();
+    persist();
   }
   function remove(b){
     hideTip();
@@ -479,9 +539,10 @@ import { dayKeyAt } from "./rules.js";
     blocks = blocks.filter(function(o){ return o !== b; });
     pruneTracks();
     render();
+    persist();
   }
 
-  /* ---------- pulling the bottom edge ---------- */
+  /* ---------- pulling the end edge (the top one) upwards ---------- */
   function give(over){ return RUBBER * (1 - 1 / (over * 0.55 / RUBBER + 1)); }
   function rubber(px, lo, hi){
     if (px > hi) return hi + give(px - hi);
@@ -504,12 +565,13 @@ import { dayKeyAt } from "./rules.js";
     var band = document.createElement("div");
     band.className = "st-band";
     band.hidden = true;
+    band.style.setProperty("--st-c", PALETTE[b.color]);
     lane.append(band, tag);
     var px = b.plan * PX;
     pull = { b: b, pointer: pointer, x: x, y: y, plan0: b.plan, base: px,
-             // where the pointer took hold, relative to the block's top: the pull is measured
-             // from here, so the block grows from the first pixel of movement
-             anchor: y - lane.getBoundingClientRect().top - yOf(b.start),
+             // where the pointer took hold, as a height above the block's start: the pull is
+             // measured from here, so the block grows from the first pixel of movement
+             anchor: yOf(b.start) - (y - lane.getBoundingClientRect().top),
              max: Math.max(MIN_PLAN, roomAfter(b)),
              edge: px, v: 0, want: px, last: performance.now(),
              created: created, tag: tag, band: band };
@@ -523,15 +585,15 @@ import { dayKeyAt } from "./rules.js";
     var b = p.b;
     var dt = Math.min(0.032, (t - p.last) / 1000);
     p.last = t;
-    // Holding near the bottom (or top) of the window scrolls it, so long pulls have room.
+    // Holding near the top (or bottom) of the window scrolls it, so long pulls have room.
     var box = scroller.getBoundingClientRect();
     if (p.y > box.bottom - 32) scroller.scrollTop += 6;
     else if (p.y < box.top + 32) scroller.scrollTop -= 6;
 
     var laneBox = lane.getBoundingClientRect();
-    var top = yOf(b.start);
-    var reach = p.y - laneBox.top - top - p.anchor;   // how far the pointer has moved since taking hold
-    // Down: each extra minute takes more pull. Up: the edge comes back 1:1.
+    var base = yOf(b.start);   // the block's bottom
+    var reach = base - (p.y - laneBox.top) - p.anchor;   // how far up the pointer has moved since taking hold
+    // Up: each extra minute takes more pull. Down: the edge comes back 1:1.
     var want = reach >= 0 ? p.base + TENSION * Math.log(1 + reach / TENSION) : p.base + reach;
     p.want = want;
     want = rubber(want, MIN_PLAN * PX, p.max * PX);
@@ -547,12 +609,12 @@ import { dayKeyAt } from "./rules.js";
     layout(b, p.edge, Date.now());
 
     // The band from the edge to the pointer: thinner the further it's stretched.
-    var gap = p.y - laneBox.top - top - p.edge;
+    var gap = (base - p.edge) - (p.y - laneBox.top);
     var col = b.col;
     if (gap > 3) {
       var w = Math.max(2, 9 - gap / 25);
       p.band.hidden = false;
-      p.band.style.top = (top + p.edge) + "px";
+      p.band.style.top = (p.y - laneBox.top) + "px";
       p.band.style.height = gap + "px";
       p.band.style.width = w + "px";
       p.band.style.left = Math.min(col.left + col.width - 6, Math.max(col.left + 6, p.x - laneBox.left)) - w / 2 + "px";
@@ -562,7 +624,7 @@ import { dayKeyAt } from "./rules.js";
 
     var mins = snapPlan(p.want, p.max);
     p.tag.textContent = "until " + clock(b.start + mins * MIN_MS) + " · " + mins + " min";
-    p.tag.style.top = (top + p.edge) + "px";
+    p.tag.style.top = (base - p.edge) + "px";
     p.tag.style.left = (col.left + 4) + "px";
     requestAnimationFrame(pullFrame);
   }
@@ -581,6 +643,7 @@ import { dayKeyAt } from "./rules.js";
     b.plan = cancel ? p.plan0 : snapPlan(p.want, p.max);
     settle(b, p.edge, b.plan * PX, p.v);
     relayout(Date.now());   // a longer block can run alongside more of the others
+    persist();              // a new block is saved once it's placed
   }
 
   // Spring the edge from where it was let go onto its 5-minute step, keeping its speed.
@@ -600,8 +663,8 @@ import { dayKeyAt } from "./rules.js";
     });
   }
 
-  /* ---------- moving the top edge: 1:1, no elasticity; the end stays put ---------- */
-  function grabTop(b, e){
+  /* ---------- moving the start edge (the bottom one): 1:1, no elasticity; the end stays put ---------- */
+  function grabStart(b, e){
     if (e.button !== 0 || pull || press || move || split) return;
     e.preventDefault();
     e.stopPropagation();
@@ -615,12 +678,12 @@ import { dayKeyAt } from "./rules.js";
              hi: end - MIN_PLAN * MIN_MS, tag: tag };
     b.anim = null;
     b.el.root.classList.add("pulling");
-    moveTop(e.clientY);
+    moveStart(e.clientY);
   }
-  function moveTop(y){
+  function moveStart(y){
     var m = move, b = m.b;
     var dy = y - m.y0 + (scroller.scrollTop - m.s0);
-    var start = snapDown(m.start0 + dy / PX * MIN_MS + SNAP / 2 * MIN_MS);
+    var start = snapDown(m.start0 - dy / PX * MIN_MS + SNAP / 2 * MIN_MS);   // up is later
     start = Math.max(m.lo, Math.min(m.hi, start));
     b.start = start;
     b.plan = Math.round((m.end - start) / MIN_MS);
@@ -636,6 +699,7 @@ import { dayKeyAt } from "./rules.js";
     m.tag.remove();
     m.b.el.root.classList.remove("pulling");
     render();   // moving the start can change what's running
+    persist();
   }
 
   /* ---------- dragging the line between two parallel columns ---------- */
@@ -660,11 +724,12 @@ import { dayKeyAt } from "./rules.js";
     if (!split || (e && e.pointerId !== split.pointer)) return;
     split = null;
     lane.classList.remove("splitting");
+    persist();
   }
 
   window.addEventListener("pointermove", function(e){
     if (split && e.pointerId === split.pointer) { moveSplit(e.clientX); return; }
-    if (move && e.pointerId === move.pointer) { moveTop(e.clientY); return; }
+    if (move && e.pointerId === move.pointer) { moveStart(e.clientY); return; }
     if (press && e.pointerId === press.pointer) {
       press.x = e.clientX;
       press.y = e.clientY;
@@ -699,12 +764,18 @@ import { dayKeyAt } from "./rules.js";
     var now = Date.now();
     if (dayKeyAt(now) !== dayKey) { buildDay(); return; }
     nowLine.style.top = yOf(now) + "px";
+    past.style.top = yOf(now) + "px";
     nowLine.firstChild.textContent = shortClock(now);
+    var ended = false;
     blocks.forEach(function(b){
       if ((pull && pull.b === b) || (move && move.b === b)) return;
+      // A block that ended because the next one in its track began: record when, so the log
+      // keeps the outcome rather than re-deriving it later.
+      if (b.end == null && b.start <= now && endOf(b, now) != null) { b.end = endOf(b, now); ended = true; }
       if (stateOf(b, now) !== b.state) remount(b);       // its time came, or the next one began
     });
     relayout(now);   // running blocks grow, which can bring them alongside others
+    if (ended) persist();
   }
   setInterval(tick, 5000);
   document.addEventListener("switchcard:visibility", tick);
@@ -717,10 +788,18 @@ import { dayKeyAt } from "./rules.js";
     $("stretch").hidden = !stretch;
     if (stretch) {
       tick();
-      scroller.scrollTop = yOf(Date.now()) - scroller.clientHeight * 0.3;   // now, a third of the way down
+      // now, two thirds of the way down, with the rest of the day above it
+      scroller.scrollTop = yOf(Date.now()) - scroller.clientHeight * 0.67;
     }
   }
   window.switchcard.onMode(setMode);
 
-  buildDay();
+  window.switchcard.stretchLoad().then(function(days){
+    saved = days || {};
+    buildDay();
+  }, function(err){
+    storageDown = String(err);
+    buildDay();
+    $("st-msg").textContent = "Stretch storage unavailable: " + storageDown;
+  });
 })();

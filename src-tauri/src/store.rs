@@ -10,6 +10,10 @@
 //! Recovery = snapshot + replay of log records with `seq > snapshot.seq`. Records are physical
 //! (whole days), so replay is idempotent and the last `day.put` for a date wins. Day objects are
 //! opaque JSON; only `date` is read here.
+//!
+//! The same code runs a second, independent log for Stretch mode under another name
+//! (`stretch.log`, `stretch.snapshot`, `stretch.log.<seq>`); see [`Store::open_named`]. Each log
+//! has its own store and its own lock, so each file still has exactly one writer.
 
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -19,9 +23,14 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The day history's log name; files are `<name>.log`, `<name>.snapshot`, `<name>.log.<seq>`.
+pub const DAYS: &str = "days";
+/// Stretch mode's log, kept apart from the day history.
+pub const STRETCH: &str = "stretch";
+#[cfg(test)]
 const LOG: &str = "days.log";
+#[cfg(test)]
 const SNAPSHOT: &str = "days.snapshot";
-const SNAPSHOT_TMP: &str = "days.snapshot.tmp";
 const GAME: &str = "game.json";
 const GAME_TMP: &str = "game.json.tmp";
 const KEEP_SEGMENTS: usize = 2;
@@ -76,6 +85,10 @@ impl Default for Limits {
 
 pub struct Store {
     dir: PathBuf,
+    /// `<name>.log`, `<name>.snapshot` and `<name>.snapshot.tmp`.
+    log_name: String,
+    snapshot_name: String,
+    snapshot_tmp: String,
     limits: Limits,
     days: BTreeMap<String, Value>,
     /// Last sequence number written (or recovered). Never reused.
@@ -119,15 +132,25 @@ impl Store {
     }
 
     pub fn open_with(dir: impl Into<PathBuf>, limits: Limits) -> Result<Store> {
+        Store::open_named(dir, DAYS, limits)
+    }
+
+    /// Open the log called `name` in `dir`. Only the `days` store owns `game.json`.
+    pub fn open_named(dir: impl Into<PathBuf>, name: &str, limits: Limits) -> Result<Store> {
         let dir = dir.into();
+        let log_name = format!("{name}.log");
+        let snapshot_name = format!("{name}.snapshot");
+        let snapshot_tmp = format!("{name}.snapshot.tmp");
         fs::create_dir_all(&dir)?;
         // A leftover .tmp is a checkpoint that never got renamed: the old snapshot is still valid.
-        let _ = fs::remove_file(dir.join(SNAPSHOT_TMP));
-        let _ = fs::remove_file(dir.join(GAME_TMP));
+        let _ = fs::remove_file(dir.join(&snapshot_tmp));
+        if name == DAYS {
+            let _ = fs::remove_file(dir.join(GAME_TMP));
+        }
 
         let mut days = BTreeMap::new();
         let mut snapshot_seq = 0;
-        let snap_path = dir.join(SNAPSHOT);
+        let snap_path = dir.join(&snapshot_name);
         let has_snapshot = snap_path.exists();
         if has_snapshot {
             let corrupt = |detail: String| StoreError::Corrupt { file: snap_path.clone(), detail };
@@ -146,12 +169,15 @@ impl Store {
             }
         }
 
-        let log_path = dir.join(LOG);
+        let log_path = dir.join(&log_name);
         let replay = replay_log(&log_path, snapshot_seq, &mut days)?;
 
         let log = OpenOptions::new().append(true).create(true).open(&log_path)?;
         Ok(Store {
             dir,
+            log_name,
+            snapshot_name,
+            snapshot_tmp,
             limits,
             days,
             seq: snapshot_seq.max(replay.last_seq),
@@ -227,12 +253,12 @@ impl Store {
         let days: Map<String, Value> = self.days.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let bytes = serde_json::to_vec(&json!({ "seq": self.seq, "days": days }))
             .map_err(|e| StoreError::Invalid(e.to_string()))?;
-        replace_file(&self.dir, SNAPSHOT_TMP, SNAPSHOT, &bytes)?;
+        replace_file(&self.dir, &self.snapshot_tmp, &self.snapshot_name, &bytes)?;
         self.snapshot_seq = self.seq;
         self.has_snapshot = true;
 
-        let log_path = self.dir.join(LOG);
-        fs::rename(&log_path, self.dir.join(format!("{LOG}.{}", self.seq)))?;
+        let log_path = self.dir.join(&self.log_name);
+        fs::rename(&log_path, self.dir.join(format!("{}.{}", self.log_name, self.seq)))?;
         self.log = OpenOptions::new().append(true).create(true).open(&log_path)?;
         sync_dir(&self.dir)?;
         self.log_bytes = 0;
@@ -242,7 +268,7 @@ impl Store {
     }
 
     fn prune_segments(&self) -> io::Result<()> {
-        let prefix = format!("{LOG}.");
+        let prefix = format!("{}.", self.log_name);
         let mut segs: Vec<(u64, PathBuf)> = fs::read_dir(&self.dir)?
             .filter_map(|e| e.ok())
             .filter_map(|e| {
@@ -539,6 +565,31 @@ mod tests {
         let mut s = Store::open(tmp.path()).unwrap();
         assert_eq!(s.days().len(), 1);
         assert_eq!(s.put_day(day("2026-09-26", 2)).unwrap(), 2);
+    }
+
+    #[test]
+    fn named_stores_keep_separate_files() {
+        let tmp = TempDir::new().unwrap();
+        let small = Limits { max_log_bytes: 1 << 20, max_log_records: 3 };
+        {
+            let mut days = Store::open(tmp.path()).unwrap();
+            let mut stretch = Store::open_named(tmp.path(), STRETCH, small).unwrap();
+            days.put_day(day("2026-10-04", 1)).unwrap();
+            for n in 1..=4 {
+                stretch.put_day(json!({ "date": "2026-10-04", "blocks": [{ "id": n }] })).unwrap();
+            }
+        }
+        // The stretch log checkpointed and rotated under its own name; days.log is untouched.
+        assert!(tmp.path().join("stretch.snapshot").exists());
+        assert!(tmp.path().join("stretch.log.3").exists());
+        assert!(!tmp.path().join(SNAPSHOT).exists());
+        assert_eq!(log_text(tmp.path()).lines().count(), 1);
+
+        let days = Store::open(tmp.path()).unwrap();
+        let stretch = Store::open_named(tmp.path(), STRETCH, small).unwrap();
+        assert_eq!(days.days()["2026-10-04"], day("2026-10-04", 1));
+        assert_eq!(stretch.days()["2026-10-04"]["blocks"][0]["id"], 4);
+        assert_eq!(stretch.seq(), 4);
     }
 
     #[test]

@@ -20,6 +20,9 @@
     putDay: function (day) { return write("put_day", { day: snapshot(day) }); },
     putGame: function (game) { return write("put_game", { game: snapshot(game) }); },
     status: function (s) { return write("status", { status: s }); },   // ordered, like writes
+    // Stretch mode's own log, separate from the day history
+    stretchLoad: function () { return invoke("stretch_load"); },   // -> { "YYYY-MM-DD": day }
+    stretchPutDay: function (day) { return write("stretch_put_day", { day: snapshot(day) }); },
     panelVisible: false                                            // the panel starts hidden
   };
 

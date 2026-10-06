@@ -27,9 +27,10 @@ menu bar item that shows the running block.
 - **Menu bar.** Left-click opens the panel. Right-click gives *Done, log it*, *Keep going*,
   *Roll a number*, *Roll mode* / *Stretch mode*, *Open*, *Launch at login* and *Quit*. The app
   has no Dock icon.
-- **Stretch mode (prototype).** A whole-day timeline: press and hold to place a block, keep
-  holding and pull down to stretch it. Hold on a running block to start a parallel one: the
-  panel splits into columns, and you can drag the line between them. Not saved yet.
+- **Stretch mode (prototype).** A whole-day timeline that runs upwards: press and hold to place
+  a block, keep holding and pull up to stretch it. Hold on a running block to start a parallel one: the
+  panel splits into columns, and you can drag the line between them. Saved in its own log,
+  separate from the day history.
 
 ## Build and run
 
@@ -63,6 +64,7 @@ days.log          append-only log, one JSON record per line
 days.snapshot     last checkpoint: {"seq": N, "days": {"YYYY-MM-DD": {...}}}
 days.log.<seq>    the two most recent rotated log segments
 game.json         Tetris state, replaced atomically
+stretch.log       Stretch mode's own log (+ stretch.snapshot, rotated segments), same rules
 ```
 
 - **Physical records.** Each record is the full image of one day:
