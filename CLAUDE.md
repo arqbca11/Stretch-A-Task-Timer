@@ -99,8 +99,10 @@ The full design is in `docs/storage.md`. The rules that must hold:
 - **Rust treats days as opaque JSON** (`serde_json::Value`) and reads only `date`. The schema
   lives in the page.
 - **Append, then sync**: one `write_all` of line + `\n`, then `sync_all()` (`F_FULLFSYNC` on
-  macOS). Acknowledge only after that. A failed append is truncated back; if that fails too, the
-  store is poisoned until restart.
+  macOS; plain `fsync` stops at the drive's cache). Acknowledge only after that. Sync the
+  directory after creating or renaming any file (new log, new data dir via its parent,
+  checkpoint rename/rotation). A failed append is truncated back; if that fails too, the store
+  is poisoned until restart.
 - **Recovery**: snapshot, then replay records with `seq > snapshot.seq`. A torn final line
   (unterminated or unparsable) is truncated; a bad line anywhere else, or an unknown op, is
   corruption: stop, leave the file untouched, surface the error. Never silently drop history.
@@ -155,7 +157,8 @@ The app is unsigned for personal use. First launch: right-click the app → Open
 - `store.rs`: append + reload; a torn final line is truncated and recovery succeeds; a final line
   without its newline is torn; a corrupt middle line fails loudly and leaves the file untouched;
   an unknown op is corruption; checkpoint + rotation, then replay from the snapshot gives
-  identical state; a crash between snapshot rename and rotation; `seq` continues across restarts.
+  identical state; a crash between snapshot rename and rotation; `seq` continues across restarts;
+  opening in a data directory that doesn't exist yet.
   Use a temp dir per test.
 - `dayKeyAt`: 4:29 am belongs to the previous day, 4:30 and 4:31 am to the same day;
   `dayBounds` spans 4:30 am to 4:30 am across a month end.

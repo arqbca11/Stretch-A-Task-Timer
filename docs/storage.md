@@ -113,12 +113,55 @@ page (stretch.js)                      Rust
 2. **Single writer.** The store lives in Tauri's managed state behind a `Mutex`. Only the two
    commands in `commands.rs` touch it, and nothing else opens the files.
 3. **Append, then sync.** The file is opened once with `O_APPEND`. A record goes out in a single
-   `write_all` of the whole line including `\n`, followed by `sync_all()`. On macOS, Rust's
-   `sync_all` issues `fcntl(F_FULLFSYNC)`, which flushes the drive's write cache as well as the
-   OS buffers. A plain `fsync` on macOS doesn't. This costs a few milliseconds per write, which
-   is fine at this write rate.
+   `write_all` of the whole line including `\n`, followed by `sync_all()`. See
+   [Append, then sync](#append-then-sync) below for exactly what each step guarantees.
 4. **Acknowledge after durability.** The in-memory map is updated and `seq` returned only after
    `sync_all` succeeds. The page shows "Not saved: …" if a write fails.
+
+### Append, then sync
+
+A write passes through three layers on its way to permanent storage:
+
+```
+write(2)  →  kernel buffer cache  →  SSD's volatile write cache  →  NAND (permanent)
+             └─ fsync(2) flushes this ┘
+             └──────── F_FULLFSYNC flushes all of this ───────┘
+```
+
+- **Append.** When `write_all` returns, the line is only in the kernel's buffer cache. A
+  process crash after that is safe, because the kernel still has the bytes. A kernel panic or
+  power loss can lose them. `write_all` may also take several `write(2)` calls, so a crash can
+  leave part of a line: the newline is the commit mark, and recovery truncates a final line
+  without one.
+- **Sync.** `File::sync_all()`, which Rust implements on macOS as `fcntl(fd, F_FULLFSYNC)`.
+  Plain `fsync(2)` on macOS sends the file's data and metadata to the drive but doesn't make
+  the drive flush its own cache, so a power loss can still lose or reorder the data (Apple's
+  man page says so). `F_FULLFSYNC` also sends the drive a flush-cache command and waits for
+  it. `sync_all` rather than `sync_data` because an append changes the file's length, which
+  is metadata. On Apple platforms both map to `F_FULLFSYNC` anyway.
+- **Acknowledge.** `put_day` returns its `seq` only after `sync_all` succeeds.
+
+Measured on the development Mac (Apple silicon, internal SSD) by appending a 500-byte line
+and syncing, 100 times:
+
+| Method | Median | p90 |
+|---|---|---|
+| no sync | 0.00 ms | 0.00 ms |
+| `fsync(2)` | 0.02 ms | 0.03 ms |
+| `F_FULLFSYNC` | 4.00 ms | 4.10 ms |
+| Rust `write_all` + `sync_all` | 4.00 ms | 4.15 ms |
+
+Rust's `sync_all` matches `F_FULLFSYNC`, which confirms it doesn't fall back to plain
+`fsync`. Plain `fsync` is 200 times cheaper because it stops at the drive's cache. About 4 ms
+per write is irrelevant at a few writes a minute.
+
+**Directory entries.** A file's data being durable doesn't make its *name* durable. The name
+is an entry in the directory, and it needs the directory itself synced. The store syncs the
+directory whenever it creates or renames a file: after creating `stretch.log` the first time,
+after creating the data directory (by syncing its parent), and after each checkpoint's rename
+and rotation.
+
+What it can't cover: a drive that reports a flush it didn't do. Software can't detect that.
 
 ### A failed append
 
@@ -193,7 +236,8 @@ correctness. They are kept (two of them) as a cheap audit trail for diagnosing d
 1. A line in `stretch.log` is a complete record exactly when it ends with `\n`.
 2. `seq` strictly increases through the log, and every record in the live log either has
    `seq > snapshot.seq` or is a leftover from a checkpoint that crashed before rotation.
-3. A write is acknowledged only after it's on stable storage (`F_FULLFSYNC`).
+3. A write is acknowledged only after it's on stable storage (`F_FULLFSYNC`), in a file whose
+   directory entry is already durable.
 4. Only `store.rs` writes these files, through one `Store` behind one lock.
 5. `days` in memory always equals snapshot + replay of the log. No other copy exists.
 
@@ -227,6 +271,8 @@ correctness. They are kept (two of them) as a cheap audit trail for diagnosing d
 - a crash between the snapshot rename and the log rotation replays correctly
 - a log missing after rotation reads as empty
 - `seq` continues across restarts, including right after a checkpoint (from the snapshot)
+- the store opens in a data directory that doesn't exist yet (the directory syncs themselves
+  can't be tested without cutting power)
 
 ## History
 

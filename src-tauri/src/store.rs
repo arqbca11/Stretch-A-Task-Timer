@@ -124,7 +124,14 @@ impl Store {
         let log_name = format!("{name}.log");
         let snapshot_name = format!("{name}.snapshot");
         let snapshot_tmp = format!("{name}.snapshot.tmp");
+        let dir_existed = dir.is_dir();
         fs::create_dir_all(&dir)?;
+        if !dir_existed {
+            // A new directory's own entry lives in its parent: make that durable too.
+            if let Some(parent) = dir.parent() {
+                sync_dir(parent)?;
+            }
+        }
         // A leftover .tmp is a checkpoint that never got renamed: the old snapshot is still valid.
         let _ = fs::remove_file(dir.join(&snapshot_tmp));
 
@@ -151,7 +158,13 @@ impl Store {
         let log_path = dir.join(&log_name);
         let replay = replay_log(&log_path, snapshot_seq, &mut days)?;
 
+        let log_existed = log_path.exists();
         let log = OpenOptions::new().append(true).create(true).open(&log_path)?;
+        if !log_existed {
+            // The new file's directory entry must be durable before any append to it is
+            // acknowledged; F_FULLFSYNC on the file alone doesn't promise that.
+            sync_dir(&dir)?;
+        }
         Ok(Store {
             dir,
             log_name,
@@ -437,6 +450,18 @@ mod tests {
             Ok(_) => panic!("expected corruption, got a store"),
         }
         assert_eq!(log_text(tmp.path()), damaged);
+    }
+
+    #[test]
+    fn opens_in_a_directory_that_does_not_exist_yet() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("com.example.stretch");
+        {
+            let mut s = open(&dir).unwrap();
+            s.put_day(day("2026-10-05", 1)).unwrap();
+        }
+        assert!(dir.join(LOG).exists());
+        assert_eq!(open(&dir).unwrap().days().len(), 1);
     }
 
     #[test]

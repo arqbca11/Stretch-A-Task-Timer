@@ -7,3 +7,6 @@ src-tauri/gen/
 # reference and reuse; see "Legacy" in CLAUDE.md.
 legacy/
 seed-export.json
+
+# Working notes for a future standalone storage project; becomes its own repo later.
+notes/
