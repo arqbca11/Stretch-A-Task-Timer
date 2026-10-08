@@ -37,6 +37,7 @@ src/                     frontend, served as-is
   js/stretch.js          the whole UI: timeline, press-and-hold, elastic pull, tracks, colours,
                          hover label, right-click menu, persistence
   js/day.js              pure: dayKeyAt, dayBounds (4:30 am day boundary); shared with tests
+  js/columns.js          pure: groups blocks and assigns columns, with widening; shared with tests
   js/bridge.js           window.stretch = { load, putDay, panelVisible } over invoke; ordered
                          write queue; forwards "panel-visibility" as the "stretch:visibility" event
   css/stretch.css        all styles; tokens on :root with dark mode
@@ -50,7 +51,7 @@ src-tauri/
   icons/                 trayTemplate.png/@2x (monochrome template) + app icons
   tauri.conf.json
 scripts/draw-icons.swift draws the tray and app icons (CoreGraphics); regenerate commands inside
-test/                    node --test suites for src/js/day.js
+test/                    node --test suites for src/js/day.js and src/js/columns.js
 docs/                    interaction.md, storage.md
 legacy/                  gitignored, local only: the archived Roll app (see Legacy)
 ```
@@ -162,6 +163,9 @@ The app is unsigned for personal use. First launch: right-click the app → Open
   Use a temp dir per test.
 - `dayKeyAt`: 4:29 am belongs to the previous day, 4:30 and 4:31 am to the same day;
   `dayBounds` spans 4:30 am to 4:30 am across a month end.
+- `columns.js`: two blocks on either side of a free column can't both widen into it; a block
+  alone takes the full width; a randomized stress test (thousands of days) where no two blocks
+  that overlap in time overlap on screen.
 
 ## Working with Ruoqi
 

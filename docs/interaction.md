@@ -85,6 +85,12 @@ Each round was built, installed and tried in the menu bar panel.
     narrow column even when only one other block ran beside it. Now each block widens over the
     neighbouring columns that are free for its whole span, and split lines are drawn only where
     two blocks actually meet.
+13. **Widening claims the column.** With many blocks, two blocks on either side of a free
+    column could both widen into it and draw on top of each other. Widening now claims the
+    column for the block's span: blocks are widened in order of start (then left to right), and
+    a column already claimed is no longer free. The layout moved to `src/js/columns.js` (pure)
+    with a randomized stress test that checks no two blocks that overlap in time overlap on
+    screen.
 
 ## Current behaviour
 
@@ -131,7 +137,9 @@ track  { id, w }                                               left-to-right ord
   block's last 10 minutes goes after that block in the same track rather than beside it.
 - **Layout:** blocks that overlap in time form a group. Within a group, each track present gets
   a column sized by its weight's share. Groups are transitive, so a block then **widens over
-  neighbouring columns that are free for its whole span** (like calendar apps). A block that
+  neighbouring columns that are free for its whole span** (like calendar apps). Widening claims
+  the column for that span, so two blocks never widen into the same one: the earlier start
+  (then the one further left) gets it. A block that
   overlaps nothing takes the full width, even if the day was split earlier. Split lines appear
   only where a block on each side of a boundary runs at the same time. Elements are kept across renders, so blocks slide to their new
   widths.

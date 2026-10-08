@@ -13,6 +13,7 @@
 // bridge to an append-only log in Rust (`stretch.log`; see docs/storage.md). The page keeps no
 // other copy.
 import { dayKeyAt, dayBounds } from "./day.js";
+import { arrange as arrangeColumns } from "./columns.js";
 
 (function(){
   "use strict";
@@ -141,41 +142,12 @@ import { dayKeyAt, dayBounds } from "./day.js";
   // Group blocks that overlap in time. Within a group, each track present gets a column whose
   // width is its weight's share among the tracks present; a block alone gets the full width.
   // A group is transitive (A overlaps B overlaps C), so a column can be empty for part of it:
-  // each block then widens over the neighbouring columns that are free for its whole span.
+  // each block then widens over the neighbouring columns that are free for its whole span and not
+  // already taken by another block widening into them (columns.js).
   function arrange(now){
-    var items = blocks.map(function(b){ return { b: b, s: b.start, e: extentOf(b, now) }; })
-      .sort(function(x, y){ return x.s - y.s; });
-    clusters = [];
-    var cur = null;
-    items.forEach(function(it){
-      if (cur && it.s < cur.to) { cur.items.push(it); cur.to = Math.max(cur.to, it.e); }
-      else { cur = { from: it.s, to: it.e, items: [it] }; clusters.push(cur); }
-    });
-    var inner = Math.max(0, lane.clientWidth - PAD_L - PAD_R);
-    clusters.forEach(function(c){
-      var present = tracks.filter(function(t){ return c.items.some(function(it){ return it.b.track === t.id; }); });
-      var total = present.reduce(function(s, t){ return s + t.w; }, 0) || 1;
-      var acc = 0;
-      c.cols = present.map(function(t, i){
-        var x0 = PAD_L + inner * acc / total;
-        acc += t.w;
-        var x1 = PAD_L + inner * acc / total;
-        var gl = i > 0 ? GUTTER / 2 : 0, gr = i < present.length - 1 ? GUTTER / 2 : 0;
-        return { track: t, x0: x0, x1: x1, left: x0 + gl, width: x1 - x0 - gl - gr };
-      });
-      c.items.forEach(function(it){
-        var i = c.cols.findIndex(function(k){ return k.track.id === it.b.track; });
-        function free(j){
-          var id = c.cols[j].track.id;
-          return !c.items.some(function(o){ return o.b.track === id && o.s < it.e && it.s < o.e; });
-        }
-        it.lo = it.hi = i;
-        while (it.lo > 0 && free(it.lo - 1)) it.lo--;
-        while (it.hi < c.cols.length - 1 && free(it.hi + 1)) it.hi++;
-        var a = c.cols[it.lo], z = c.cols[it.hi];
-        it.b.col = { left: a.left, width: z.left + z.width - a.left };
-      });
-    });
+    var items = blocks.map(function(b){ return { b: b, track: b.track, s: b.start, e: extentOf(b, now) }; });
+    clusters = arrangeColumns(items, tracks, Math.max(0, lane.clientWidth - PAD_L - PAD_R), PAD_L, GUTTER);
+    items.forEach(function(it){ it.b.col = it.col; });
   }
 
   // Lay everything out again: columns, then every block not mid-gesture, then the split lines.

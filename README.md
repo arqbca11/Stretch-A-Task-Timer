@@ -117,6 +117,7 @@ src/                     frontend, served as-is (no framework, no bundler)
   index.html             the panel: header and timeline
   js/stretch.js          the timeline, elastic pull, parallel tracks, colours
   js/day.js              the 4:30 am day boundary (shared with the tests)
+  js/columns.js          how parallel blocks share the width (shared with the tests)
   js/bridge.js           window.stretch = { load, putDay } over Tauri invoke
   css/stretch.css        all styles; light and dark
   css/fonts.css, fonts/  Karla, served locally
