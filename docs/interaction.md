@@ -91,6 +91,15 @@ Each round was built, installed and tried in the menu bar panel.
     a column already claimed is no longer free. The layout moved to `src/js/columns.js` (pure)
     with a randomized stress test that checks no two blocks that overlap in time overlap on
     screen.
+14. **Overrun stopped growing.** The sketch's note 4 ("if you don't stop when the time is up,
+    the block keeps growing by itself") was built in rounds 1–13: a running block's top edge
+    followed now past its plan. *Feedback (2026-10-18):* it should stop growing at the planned
+    end, and be stretchable to now or beyond when you come back. Now a block never extends past
+    its planned end: past it the block sits fully solid but stays *running*, with its handles,
+    until Done or the next block in its track begins. The pull limit for a begun block is now
+    `elapsed + MAX_PLAN` (i.e. up to 3 h past now), so coming back late never leaves it out of
+    reach; *Done* after the plan has passed ends it at the planned end, where it visibly stopped.
+    The hover label past the plan says "9:00–9:30 AM · time up, pull to continue".
 
 ## Current behaviour
 
@@ -101,8 +110,8 @@ Each round was built, installed and tried in the menu bar panel.
   - Target length = `base + TENSION·ln(1 + reach/TENSION)`, where `reach` is the pointer travel
     since taking hold. Pulling back down is 1:1.
   - The edge follows the target on a spring (`FOLLOW_K/C`), so it lags and overshoots.
-  - Past the limits (10 min, 180 min, the next block in the same track) the edge gives at most
-    36 px.
+  - Past the limits (10 min; 180 min for a block that hasn't begun, elapsed + 180 min for one
+    that has; the next block in the same track) the edge gives at most 36 px.
   - A band connects the edge to the pointer, and the block narrows under tension.
   - On release, the length snaps to a 5-minute step and springs there (`SPRING_K/C`), starting
     from the edge's current speed.
@@ -111,12 +120,16 @@ Each round was built, installed and tried in the menu bar panel.
 - **Colour:** each block gets the next colour after the last block placed (`PALETTE` in
   `stretch.js`). Black text reads on all of them.
 - **Fill:** the spent part is solid colour, from the bottom up, and the rest is translucent. The fill grows every 5 s
-  with a 1 s ease. A block not yet started is all translucent.
+  with a 1 s ease. A block not yet started is all translucent. The fill (and the block) stops at
+  the planned end: a block past its plan sits fully solid, still running, until Done or the next
+  block in its track begins. Pull its top edge to stretch it to now or beyond.
 - **Name:** hidden until you double-click the block. Then it's edited in place, centred, and
   shown as bold text.
 - **Hover:** a label next to the pointer, e.g. "since 8:55 PM · 3 of 65 min",
-  "9:20 PM · 50 min" or "8:10–9:00 PM · 50 min".
-- **Right-click:** *Done* (if running) and *Remove*.
+  "9:20 PM · 50 min", "8:10–9:00 PM · 50 min" or, past the plan,
+  "8:10–9:00 PM · time up, pull to continue".
+- **Right-click:** *Done* (if running) and *Remove*. *Done* ends the block at now, or at its
+  planned end if that has already passed.
 
 ## The model
 
@@ -126,10 +139,10 @@ block  { id, task, track, start, plan (min), created, end, color }
 track  { id, w }                                               left-to-right order, width weight
 ```
 
-- **Tracks are independent sequences.** Within a track, blocks don't overlap. A block keeps
-  going, past its plan if need be, until the next block *in its track* begins. A block filled
-  in after that next block had already begun (`created > next.start`) covers only its plan.
-  Blocks in other tracks run in parallel and never end it.
+- **Tracks are independent sequences.** Within a track, blocks don't overlap. A block runs until
+  the next block *in its track* begins, and never extends past its planned end: when its plan
+  runs out it stops growing but stays running (and stretchable) until something ends it. Blocks
+  in other tracks run in parallel and never end it.
 - **State is derived** from the time and the blocks: `ahead` (start > now), `running`
   (no end yet), `done`.
 - **Placement:** the new block tries the column under the pointer first, then the other tracks

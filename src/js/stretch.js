@@ -102,33 +102,33 @@ import { arrange as arrangeColumns } from "./columns.js";
     });
     return p;
   }
-  // When a block stops. Done sets it outright. Otherwise a block keeps going (past its plan, if
-  // need be) until the next block in its track begins. A block placed after that one had already
-  // begun is filled in afterwards, so it covers its plan and no more. Blocks in other tracks run
-  // in parallel and never end it.
+  // When a block stops. Done sets it outright. Otherwise a block ends when the next block in its
+  // track begins, and never later than its planned end: past the plan it stops growing but stays
+  // running (and stretchable) until something ends it. Blocks in other tracks run in parallel and
+  // never end it.
   function endOf(b, now){
     if (b.end != null) return b.end;
     var n = nextAfter(b);
-    if (n && n.start <= now) {
-      return b.created <= n.start ? n.start : Math.min(b.start + b.plan * MIN_MS, n.start);
-    }
+    if (n && n.start <= now) return Math.min(b.start + b.plan * MIN_MS, n.start);
     return null;
   }
   function stateOf(b, now){
     if (b.start > now) return "ahead";
     return endOf(b, now) == null ? "running" : "done";
   }
-  // Where the block's area on the timeline ends.
+  // Where the block's area on the timeline ends: its end, or else its planned end.
   function extentOf(b, now){
     var e = endOf(b, now);
-    if (e != null) return e;
-    var planEnd = b.start + b.plan * MIN_MS;
-    return b.start <= now ? Math.max(planEnd, now) : planEnd;
+    return e != null ? e : b.start + b.plan * MIN_MS;
   }
-  // The longest plan that fits before the next block in its track (or the end of the day).
+  // The longest plan that fits before the next block in its track (or the end of the day). A
+  // block that has begun can be stretched to now and up to MAX_PLAN beyond it, so coming back
+  // late never leaves the block out of reach.
   function roomAfter(b){
+    var now = Date.now();
+    var cap = b.start <= now ? minsBetween(b.start, now) + MAX_PLAN : MAX_PLAN;
     var n = nextAfter(b);
-    return Math.min(MAX_PLAN, minsBetween(b.start, n ? n.start : dayEnd));
+    return Math.min(cap, minsBetween(b.start, n ? n.start : dayEnd));
   }
   function snapPlan(px, max){
     var m = Math.round(px / PX / SNAP) * SNAP;
@@ -319,8 +319,8 @@ import { arrange as arrangeColumns } from "./columns.js";
     if (b.state === "done") {
       height = solid = Math.max(3, (endOf(b, now) - b.start) / MIN_MS * PX);
     } else if (b.state === "running") {
-      solid = Math.max(0, (now - b.start) / MIN_MS * PX);
-      height = Math.max(planPx, solid);   // past its plan, the block grows by itself
+      height = planPx;
+      solid = Math.min(height, Math.max(0, (now - b.start) / MIN_MS * PX));   // the fill stops at the planned end
     } else {
       height = planPx;
       solid = 0;
@@ -332,8 +332,7 @@ import { arrange as arrangeColumns } from "./columns.js";
     r.root.style.left = (col.left + inset) + "px";
     r.root.style.width = Math.max(8, col.width - 2 * inset) + "px";
     r.fill.style.height = solid + "px";
-    if (r.handle) r.handle.style.top = (height - planPx) + "px";   // the planned end, which overrun passes
-
+    if (r.handle) r.handle.style.top = "0px";   // the top edge is always the planned end
   }
 
   // What the hover label says about a block.
@@ -344,8 +343,8 @@ import { arrange as arrangeColumns } from "./columns.js";
     }
     if (b.state === "running") {
       var e = minsBetween(b.start, now);
-      return "since " + clock(b.start) + " · " +
-        (e > b.plan ? e + " min, " + (e - b.plan) + " over" : e + " of " + b.plan + " min");
+      if (e > b.plan) return clock(b.start) + "–" + clock(b.start + b.plan * MIN_MS) + " · time up, pull to continue";
+      return "since " + clock(b.start) + " · " + e + " of " + b.plan + " min";
     }
     return clock(b.start) + " · " + b.plan + " min";
   }
@@ -525,8 +524,10 @@ import { arrange as arrangeColumns } from "./columns.js";
     beginPull(b, p.pointer, p.x, p.y, true);
   }
 
+  // Done ends the block where it stands: now, or its planned end if that has already passed
+  // (the block stopped growing there).
   function finish(b){
-    b.end = Date.now();
+    b.end = Math.min(Date.now(), b.start + b.plan * MIN_MS);
     render();
     persist();
   }
