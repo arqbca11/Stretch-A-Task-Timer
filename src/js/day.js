@@ -20,3 +20,15 @@ export function dayBounds(key){
   var end = new Date(+p[0], +p[1] - 1, +p[2] + 1, 0, DAY_START_MIN);
   return { start: start.getTime(), end: end.getTime() };
 }
+
+// The calendar's page for a month (`month` 0–11): six weeks of "YYYY-MM-DD" keys, Sunday first,
+// starting on the Sunday on or before the 1st. Each is { key, inMonth }.
+export function monthCells(year, month){
+  var first = new Date(year, month, 1);
+  var cells = [];
+  for (var i = 0; i < 42; i++) {
+    var d = new Date(year, month, 1 - first.getDay() + i);
+    cells.push({ key: keyOf(d), inMonth: d.getMonth() === month });
+  }
+  return cells;
+}

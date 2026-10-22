@@ -9,7 +9,14 @@
 </head>
 <body>
 <main class="stretch" id="stretch" aria-label="Today's timeline">
-  <div class="st-head"><b id="st-date">Today</b><span id="st-msg" aria-live="polite"></span></div>
+  <div class="st-head">
+    <b id="st-date">Today</b>
+    <button type="button" class="st-today" id="st-today" title="Back to today" hidden>Today</button>
+    <span id="st-msg" aria-live="polite"></span>
+    <button type="button" class="st-cal-btn" id="st-cal-btn" title="Pick a day" aria-label="Pick a day" aria-expanded="false">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="3" width="13" height="11.5" rx="1.5"/><path d="M1.5 6.5h13M5 1.5v3M11 1.5v3"/></svg>
+    </button>
+  </div>
   <div class="st-scroll" id="st-scroll">
     <div class="st-day" id="st-day">
       <div class="st-axis" id="st-axis"></div>

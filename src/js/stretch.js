@@ -1,19 +1,38 @@
 // Stretch. A whole-day timeline that runs upwards: the morning is at the bottom
-// and later is higher up. Press and hold to place a block, pull its top edge up to change when
-// it ends. A block starts at the time it was placed: behind now it's already
-// going, ahead of now it begins by itself when the time comes. Its spent part turns solid as time
-// passes.
+// and later is higher up. Press and hold to place a block: a die is thrown at the press point,
+// bounces on the start line, and the block sprouts up by the rolled number of minutes (30–100)
+// — then pull its top edge to shrink or stretch it. A block starts where it was pressed: behind
+// now it's already going, ahead of now it begins by itself when the time comes. Its spent part
+// turns solid as time passes.
 //
-// Multitasking: press and hold anywhere, even on a block, and if that time is taken the new block
-// goes in a new track beside it. Each track is a column with a width weight. Where blocks run in
-// parallel the panel splits by those weights (drag the line between two to change the split);
-// where a block runs alone it takes the full width.
+// Blocks aren't named by typing. They're labeled: right-click one and pick a task type (or add
+// a new one — every label ever added is kept to pick from, in the "labels" record). A labeled
+// block wears a small speech bubble; clicking it opens the bubble with the label and a small
+// note to scribble in.
 //
-// Storage: each change writes the whole day, blocks and tracks, as one record through the
-// bridge to an append-only log in Rust (`stretch.log`; see docs/storage.md). The page keeps no
-// other copy.
-import { dayKeyAt, dayBounds } from "./day.js";
-import { arrange as arrangeColumns } from "./columns.js";
+// Multitasking: every block is thin (about a tenth of the panel) and sits where it was put —
+// the x axis is free, and the distances between blocks are the owner's to mean something with
+// (how related two tasks are). Blocks that overlap in x are one queue, like processes pinned to
+// one core: a block runs until the next one over it begins. Blocks apart in x run in parallel.
+// Drag a block sideways to move it. Two or three running blocks can be marked as "switching":
+// not parallel but time-sliced on one core, the way a single CPU multitasks by context-switching
+// — while the group is on, a little ball bounces between the members around the now line, like
+// an atom hitting each block at an angle, and each member gets about 1/n of the wall clock as
+// focused time (shown on hover).
+//
+// Other days: the calendar at the top right opens any day. A past day shows what was done and
+// can still be touched up; a future day starts blank and takes blocks ahead of time, which are
+// simply there when the day comes. The view follows the clock only while it's on today.
+//
+// Getting up and going to bed: right-click a blank spot for "Got out of bed!" or "Going to bed!",
+// a small bubble pointing at the axis at that time. Drag it up or down to the exact minute.
+//
+// Storage: each change writes the whole day, blocks and switching groups, as one record through
+// the bridge to an append-only log in Rust (`stretch.log`; see docs/storage.md). The page keeps
+// no other copy.
+import { dayKeyAt, dayBounds, monthCells } from "./day.js";
+import { focusedMs } from "./switching.js";
+import { rollDie, cancelRoll, dieBusy } from "./dice.js";
 
 (function(){
   "use strict";
@@ -21,7 +40,7 @@ import { arrange as arrangeColumns } from "./columns.js";
   /* ---------- tunables (minutes; the timeline is drawn at PX px per minute) ---------- */
   var PX = 1.6;                     // 24 h is about 2,300 px
   var SNAP = 5;                     // starts and ends land on 5-minute steps
-  var DEFAULT_PLAN = 30;            // a new block appears at 30 minutes
+  var ROLL_MIN = 30, ROLL_MAX = 100;   // a new block's length is rolled, 30–100 min on 5-min steps
   var MIN_PLAN = 10, MAX_PLAN = 180;
   var HOLD_MS = 400;                // press and hold this long to make a block; a click makes nothing
   var HOLD_SLOP = 6;                // px: moving further than this before then cancels the press
@@ -35,8 +54,12 @@ import { arrange as arrangeColumns } from "./columns.js";
   var FOLLOW_K = 110, FOLLOW_C = 11;   // spring while pulling: soft, so it trails and wobbles
   var SPRING_K = 380, SPRING_C = 14;   // spring after release: settles onto the 5-minute step
   var SQUEEZE = 18;                 // px: how much the block narrows on each side at full tension
-  var MIN_COL = 44;                 // px: the narrowest a parallel column can be dragged
-  var PAD_L = 12, PAD_R = 8, GUTTER = 4;   // px: lane padding and the gap between parallel columns
+  var BLOCK_W = 34;                 // px: every block is this wide, about a tenth of the panel
+  var PAD_L = 12, PAD_R = 8;        // px: lane padding
+  var INK = 2;                      // px: a block's outline, matching the CSS border
+  var BADGE_INK = 2;                // px: the badge's outline, matching .st-bub-icon's border
+  var SHADE_X = 5, SHADE_Y = 4;     // px: how far the halftone shadow peeks out bottom-right
+  var SWITCH_MAX = 3;               // the most blocks that can switch together
 
   // Each new block takes the next colour in this ring, so no two blocks in a row match. Bright
   // enough that black text reads on all of them. Stored as "r,g,b" for rgb()/rgba() in the CSS.
@@ -53,15 +76,22 @@ import { arrange as arrangeColumns } from "./columns.js";
   ];
 
   var MIN_MS = 60000;
-  // Blocks: { id, task, track, start, plan (min), created, end, color }, times in ms; `end` is
-  // set only by Done; `color` is an index into PALETTE. Tracks: { id, w }, in left-to-right order; `w` is a width weight.
-  var blocks = [], tracks = [];
-  var clusters = [];  // groups of blocks that overlap in time, from the last arrange()
+  // Blocks: { id, task, x, start, plan (min), created, end, color, label, note }, times in ms;
+  // `end` is set only by Done; `x` is the block's left edge in the lane, px; `color` indexes
+  // PALETTE; `label` is a label id (or null) and `note` a small free note, both shown in the
+  // block's speech bubble. `task` is a typed name from before labels; old blocks still show it.
+  // Switching groups: { id, blocks: [block ids], from, to }, `to` null while on (switching.js).
+  // Labels are global, not per day: [{ id, name }], kept in their own "labels" record.
+  // Marks: when she got out of bed and went to bed that day, ms or null.
+  var blocks = [], switches = [];
+  var marks = { wake: null, sleep: null };
+  var labels = [], nextLabelId = 1;
   var dayKey = null, dayStart = 0, dayEnd = 0;
+  var following = true;   // showing today, so the view moves on when the day rolls over
   var pull = null;   // the end edge (on top) being pulled
   var press = null;  // a press that becomes a block if it's held
   var move = null;   // the start edge (at the bottom) being moved
-  var split = null;  // the line between two parallel columns being dragged
+  var drag = null;   // a block being dragged sideways to a new place
   var nextId = 1;
   var msgTimer = null;
   var saved = {};      // the days as loaded and since written, by date
@@ -86,26 +116,29 @@ import { arrange as arrangeColumns } from "./columns.js";
   function hourLabel(h){ return (h % 12 || 12) + (h < 12 ? " am" : " pm"); }
   function minsBetween(a, b){ return Math.floor((b - a) / MIN_MS); }
 
-  /* ---------- blocks (each track is its own sequence) ---------- */
-  function trackOf(id){ return tracks.find(function(t){ return t.id === id; }); }
+  /* ---------- queues: blocks that overlap in x share a core and run in sequence ---------- */
+  function maxX(){ return lane.clientWidth - PAD_R - BLOCK_W; }
+  function clampX(x){ return Math.max(PAD_L, Math.min(maxX(), x)); }
+  function xOverlap(a, b){ return Math.abs(a.x - b.x) < BLOCK_W; }
+  function byId(id){ return blocks.find(function(b){ return b.id === id; }); }
   function nextAfter(b){
     var n = null;
     blocks.forEach(function(o){
-      if (o !== b && o.track === b.track && o.start > b.start && (!n || o.start < n.start)) n = o;
+      if (o !== b && xOverlap(o, b) && o.start > b.start && (!n || o.start < n.start)) n = o;
     });
     return n;
   }
   function prevBefore(b){
     var p = null;
     blocks.forEach(function(o){
-      if (o !== b && o.track === b.track && o.start < b.start && (!p || o.start > p.start)) p = o;
+      if (o !== b && xOverlap(o, b) && o.start < b.start && (!p || o.start > p.start)) p = o;
     });
     return p;
   }
   // When a block stops. Done sets it outright. Otherwise a block ends when the next block in its
-  // track begins, and never later than its planned end: past the plan it stops growing but stays
-  // running (and stretchable) until something ends it. Blocks in other tracks run in parallel and
-  // never end it.
+  // queue (the next block over it in x) begins, and never later than its planned end: past the
+  // plan it stops growing but stays running (and stretchable) until something ends it. Blocks
+  // apart in x run in parallel and never end it.
   function endOf(b, now){
     if (b.end != null) return b.end;
     var n = nextAfter(b);
@@ -121,7 +154,7 @@ import { arrange as arrangeColumns } from "./columns.js";
     var e = endOf(b, now);
     return e != null ? e : b.start + b.plan * MIN_MS;
   }
-  // The longest plan that fits before the next block in its track (or the end of the day). A
+  // The longest plan that fits before the next block in its queue (or the end of the day). A
   // block that has begun can be stretched to now and up to MAX_PLAN beyond it, so coming back
   // late never leaves the block out of reach.
   function roomAfter(b){
@@ -134,77 +167,283 @@ import { arrange as arrangeColumns } from "./columns.js";
     var m = Math.round(px / PX / SNAP) * SNAP;
     return Math.max(MIN_PLAN, Math.min(max, m));
   }
-  function pruneTracks(){
-    tracks = tracks.filter(function(t){ return blocks.some(function(b){ return b.track === t.id; }); });
-  }
 
-  /* ---------- side by side ---------- */
-  // Group blocks that overlap in time. Within a group, each track present gets a column whose
-  // width is its weight's share among the tracks present; a block alone gets the full width.
-  // A group is transitive (A overlaps B overlaps C), so a column can be empty for part of it:
-  // each block then widens over the neighbouring columns that are free for its whole span and not
-  // already taken by another block widening into them (columns.js).
-  function arrange(now){
-    var items = blocks.map(function(b){ return { b: b, track: b.track, s: b.start, e: extentOf(b, now) }; });
-    clusters = arrangeColumns(items, tracks, Math.max(0, lane.clientWidth - PAD_L - PAD_R), PAD_L, GUTTER);
-    items.forEach(function(it){ it.b.col = it.col; });
-  }
-
-  // Lay everything out again: columns, then every block not mid-gesture, then the split lines.
+  // Lay every block not mid-gesture out again, and refresh the switching balls.
   function relayout(now){
-    arrange(now);
     blocks.forEach(function(b){
-      if (!b.el || b.anim || (pull && pull.b === b)) return;
+      if (!b.el || b.anim || (pull && pull.b === b) || (drag && drag.b === b)) return;
       layout(b, null, now);
     });
-    drawSplits();
+    rebuildBalls();
+    rebuildTies();
   }
 
-  // The lines between parallel columns, only where a block on each side meets there: drag one
-  // to change the split.
-  function drawSplits(){
-    lane.querySelectorAll(".st-split").forEach(function(el){ el.remove(); });
-    clusters.forEach(function(c){
-      for (var i = 0; i < c.cols.length - 1; i++) {
-        // the times when a block ending at this boundary runs beside one starting at it
-        var spans = [];
-        c.items.forEach(function(a){
-          if (a.hi !== i) return;
-          c.items.forEach(function(b){
-            if (b.lo === i + 1 && a.s < b.e && b.s < a.e) spans.push([Math.max(a.s, b.s), Math.min(a.e, b.e)]);
-          });
-        });
-        spans.sort(function(x, y){ return x[0] - y[0]; });
-        var merged = [];
-        spans.forEach(function(sp){
-          var last = merged[merged.length - 1];
-          if (last && sp[0] <= last[1]) last[1] = Math.max(last[1], sp[1]);
-          else merged.push(sp.slice());
-        });
-        merged.forEach(function(sp){ addSplit(c.cols[i], c.cols[i + 1], sp[0], sp[1]); });
+  /* ---------- aligned blocks: one label, one x, tied by a dashed line ---------- */
+  // Blocks that share a label and sit at exactly the same x are aligned: a dashed line runs up
+  // the gap between each one and the next. Nothing is stored — it's drawn from the labels and
+  // the x positions, so dragging one away unties it. "Align" in the right-click menu lines up
+  // every block of a label at once.
+  var ties = [];
+  function kinOf(b){
+    return b.label == null ? [] : blocks.filter(function(o){ return o.label === b.label; });
+  }
+  function rebuildTies(){
+    var keep = {};
+    ties.forEach(function(t){ keep[t.key] = t; });
+    ties = [];
+    var rows = {};   // label:x → blocks, so each column of a label is tied in start order
+    blocks.forEach(function(b){
+      if (b.label == null || !b.el || (drag && drag.b === b)) return;
+      (rows[b.label + ":" + b.x] = rows[b.label + ":" + b.x] || []).push(b);
+    });
+    Object.keys(rows).forEach(function(r){
+      var row = rows[r].sort(function(a, c){ return a.start - c.start; });
+      for (var i = 0; i < row.length - 1; i++) {
+        var key = row[i].id + ":" + row[i + 1].id;
+        var t = keep[key];
+        delete keep[key];
+        if (!t) {
+          var el = document.createElement("div");
+          el.className = "st-tie";
+          lane.append(el);
+          t = { key: key, el: el };
+        }
+        t.lo = row[i];
+        t.hi = row[i + 1];
+        placeTie(t);
+        ties.push(t);
       }
     });
+    Object.keys(keep).forEach(function(key){ keep[key].el.remove(); });
   }
-  function addSplit(left, right, from, to){
-    var el = document.createElement("div");
-    el.className = "st-split";
-    el.title = "Drag to change the split";
-    el.style.top = yOf(to) + "px";
-    el.style.height = (yOf(from) - yOf(to)) + "px";
-    el.style.left = (left.x1 - 5) + "px";
-    el.addEventListener("pointerdown", grabSplit.bind(null, left, right));
-    lane.append(el);
+  // From the top of the earlier block up to the bottom of the later one (time runs up).
+  function placeTie(t){
+    var lo = t.lo.el.root, hi = t.hi.el.root;
+    var top = hi.offsetTop + hi.offsetHeight, bottom = lo.offsetTop;
+    t.el.hidden = bottom - top < 2;
+    t.el.style.left = (t.lo.x + BLOCK_W / 2 - 1) + "px";
+    t.el.style.top = top + "px";
+    t.el.style.height = Math.max(0, bottom - top) + "px";
+  }
+  function placeTiesOf(b){
+    ties.forEach(function(t){ if (t.lo === b || t.hi === b) placeTie(t); });
+  }
+
+  // Line up every block of b's label at b's x. If that x would sit them on another block, the
+  // nearest x where all of them fit is used instead; blocks of one label that overlap in time
+  // can't share a queue, so then nothing moves.
+  function align(b){
+    var kin = kinOf(b), now = Date.now();
+    var seq = kin.slice().sort(function(a, c){ return a.start - c.start; });
+    for (var i = 0; i < seq.length - 1; i++) {
+      if (extentOf(seq[i], now) > seq[i + 1].start) {
+        say("Can't align: two " + labelOf(b) + " blocks overlap in time.");
+        return;
+      }
+    }
+    function fits(x){
+      return kin.every(function(k){
+        return !blocks.some(function(o){
+          return kin.indexOf(o) < 0 && Math.abs(o.x - x) < BLOCK_W &&
+            o.start < extentOf(k, now) && k.start < extentOf(o, now);
+        });
+      });
+    }
+    var x = null;
+    for (var d = 0; x == null && d < lane.clientWidth; d += 4) {
+      if (clampX(b.x + d) === b.x + d && fits(b.x + d)) x = b.x + d;
+      else if (clampX(b.x - d) === b.x - d && fits(b.x - d)) x = b.x - d;
+    }
+    if (x == null) { say("No room to align these."); return; }
+    kin.forEach(function(k){ k.x = x; });
+    render();   // they're one queue now; the slide transition carries them there
+    persist();
+  }
+
+  /* ---------- the switching ball: an atom bouncing between the members ---------- */
+  // While a group is on, a little ball ricochets across each gap between adjacent members. Each
+  // leg is a straight line: the ball only changes direction when it strikes a block, where it
+  // reflects sideways and leaves for a new vertical offset (within ±BALL_AMP of the now line),
+  // so the angle changes bounce to bounce. The last few legs stay visible as a fading trace.
+  // The ball is only there while both members are inside their plans: when one's time is up it
+  // vanishes, and comes back when that block is stretched past now again. It rides up with the
+  // clock and goes when the group does. With reduced motion it sits still in the gap, no trace.
+  var BALL = 5, BALL_AMP = 9;          // px: ball size (matches the CSS) and vertical reach
+  var BALL_VX = 34;                    // px/s: sideways speed; a leg's vertical speed follows
+  var TRACE_MS = 5000;                 // how long a finished leg takes to fade
+  var balls = [], ballsRaf = false, ballLast = 0;
+
+  // Aim for a new vertical offset on the far block, reached exactly at the next strike.
+  function aim(k){
+    var T = Math.max(0.2, (k.hi - k.lo) / BALL_VX);
+    k.vy = ((Math.random() * 2 - 1) * BALL_AMP - k.dy) / T;
+  }
+  function ballAt(k, cy){ return { x: k.x + BALL / 2, y: cy + k.dy }; }
+  function legStart(k, cy){
+    if (reduceMotion.matches) return;
+    var p = ballAt(k, cy);
+    k.tx = p.x;
+    k.ty = p.y;
+    k.leg = document.createElement("div");
+    k.leg.className = "st-trace";
+    lane.append(k.leg);
+  }
+  function legUpdate(k, cy){
+    if (!k.leg) return;
+    var p = ballAt(k, cy);
+    k.leg.style.left = k.tx + "px";
+    k.leg.style.top = k.ty + "px";
+    k.leg.style.width = Math.hypot(p.x - k.tx, p.y - k.ty) + "px";
+    k.leg.style.transform = "rotate(" + Math.atan2(p.y - k.ty, p.x - k.tx) + "rad)";
+  }
+  // A strike: freeze the leg and let it fade, then start the next one from here.
+  function legEnd(k, cy){
+    if (!k.leg) return;
+    legUpdate(k, cy);
+    var el = k.leg;
+    el.classList.add("fading");
+    setTimeout(function(){ el.remove(); }, TRACE_MS + 100);
+    legStart(k, cy);
+  }
+  // A strike against a block: the ball squashes against the wall for a beat, and two comic
+  // accent strokes flare at the contact point — the context switch made visible.
+  function strike(k, dir, cy){
+    if (reduceMotion.matches) return;
+    if (k.el.animate) k.el.animate(
+      [{ transform: "scale(.55, 1.45)" }, { transform: "none" }],
+      { duration: 150, easing: "cubic-bezier(.2,.8,.4,1)" });
+    var s = document.createElement("div");
+    s.className = "st-spark" + (dir < 0 ? " flip" : "");
+    s.style.left = (k.x + BALL / 2) + "px";
+    s.style.top = (cy + k.dy) + "px";
+    lane.append(s);
+    setTimeout(function(){ s.remove(); }, 450);
+  }
+
+  function hideBall(k){
+    k.el.hidden = true;
+    if (k.leg) { k.leg.remove(); k.leg = null; }
+  }
+  function dropBall(k){
+    k.el.remove();
+    if (k.leg) k.leg.remove();
+  }
+
+  function rebuildBalls(){
+    var keep = {};
+    balls.forEach(function(k){ keep[k.key] = k; });
+    balls = [];
+    var now = Date.now(), cy = yOf(now);
+    switches.forEach(function(g){
+      if (g.to != null) return;
+      var members = g.blocks.map(byId).filter(Boolean).sort(function(a, c){ return a.x - c.x; });
+      for (var i = 0; i < members.length - 1; i++) {
+        var lo = members[i].x + BLOCK_W + 1, hi = members[i + 1].x - 1 - BALL;
+        if (hi <= lo) continue;
+        var key = g.id + ":" + i;
+        var k = keep[key];
+        delete keep[key];
+        if (!k) {
+          var el = document.createElement("div");
+          el.className = "st-ball";
+          el.hidden = true;
+          lane.append(el);
+          k = { key: key, el: el, x: lo + Math.random() * (hi - lo),
+                dy: (Math.random() * 2 - 1) * BALL_AMP,
+                sx: Math.random() < 0.5 ? -1 : 1, leg: null };
+        }
+        k.a = members[i];
+        k.b = members[i + 1];
+        k.lo = lo;
+        k.hi = hi;
+        k.x = Math.max(lo, Math.min(hi, k.x));
+        if (k.vy == null) aim(k);
+        balls.push(k);
+      }
+    });
+    Object.keys(keep).forEach(function(key){ dropBall(keep[key]); });
+    balls.forEach(function(k){ placeBall(k, now, cy); });
+    if (balls.length && !ballsRaf && !reduceMotion.matches) {
+      ballsRaf = true;
+      ballLast = performance.now();
+      requestAnimationFrame(ballFrame);
+    }
+  }
+
+  // Show, hide or pin the ball by the members' state; shared by rebuilds and frames.
+  function placeBall(k, now, cy){
+    if (extentOf(k.a, now) <= now || extentOf(k.b, now) <= now) { hideBall(k); return false; }
+    if (k.el.hidden) {
+      k.el.hidden = false;
+      legStart(k, cy);
+    }
+    if (reduceMotion.matches) { k.x = (k.lo + k.hi) / 2; k.dy = 0; }
+    k.el.style.left = k.x + "px";
+    k.el.style.top = (cy + k.dy - BALL / 2) + "px";
+    return true;
+  }
+
+  function ballFrame(t){
+    if (!balls.length || reduceMotion.matches) { ballsRaf = false; return; }
+    var dt = Math.min(0.05, (t - ballLast) / 1000);
+    ballLast = t;
+    var now = Date.now(), cy = yOf(now);
+    balls.forEach(function(k){
+      if (!placeBall(k, now, cy)) return;
+      k.x += k.sx * BALL_VX * dt;
+      k.dy += k.vy * dt;
+      var hit = 0;
+      if (k.x <= k.lo) { k.x = k.lo; k.sx = 1; hit = 1; }
+      else if (k.x >= k.hi) { k.x = k.hi; k.sx = -1; hit = -1; }
+      k.dy = Math.max(-BALL_AMP, Math.min(BALL_AMP, k.dy));
+      k.el.style.left = k.x + "px";
+      k.el.style.top = (cy + k.dy - BALL / 2) + "px";
+      if (hit) { legEnd(k, cy); aim(k); strike(k, hit, cy); }
+      else legUpdate(k, cy);
+    });
+    requestAnimationFrame(ballFrame);
+  }
+
+  /* ---------- switching groups ---------- */
+  function activeGroupOf(b){
+    return switches.find(function(g){ return g.to == null && g.blocks.indexOf(b.id) >= 0; });
+  }
+  // Mark b and o as switched between. If b already switches, o joins: the old group is closed
+  // and a wider one opens, so each span keeps the size it ran at.
+  function joinSwitch(b, o){
+    var now = Date.now();
+    var g = activeGroupOf(b);
+    var members = g ? g.blocks.slice() : [b.id];
+    if (g) g.to = now;
+    members.push(o.id);
+    switches.push({ id: nextId++, blocks: members, from: now, to: null });
+    relayout(now);
+    persist();
+  }
+  function endSwitch(g){
+    g.to = Date.now();
+    relayout(g.to);
+    persist();
   }
 
   /* ---------- the day ---------- */
-  function buildDay(){
-    dayKey = dayKeyAt(Date.now());
+  // Show the day `key` ("YYYY-MM-DD"), today if none.
+  function buildDay(key){
+    var today = dayKeyAt(Date.now());
+    dayKey = key || today;
+    following = dayKey === today;
     var bounds = dayBounds(dayKey);
     dayStart = bounds.start;
     dayEnd = bounds.end;
     day.style.height = yOf(dayStart) + "px";
-    $("st-date").textContent = new Date(dayStart).toLocaleDateString(undefined,
-      { weekday:"long", month:"long", day:"numeric" });
+    var opts = { weekday:"long", month:"long", day:"numeric" };
+    if (dayKey.slice(0, 4) !== today.slice(0, 4)) opts.year = "numeric";
+    $("st-date").textContent = new Date(dayStart).toLocaleDateString(undefined, opts);
+    $("st-today").hidden = following;
+    cancelRoll();
+    cancelPress();
+    closeMenu();
+    hideTip();
 
     axis.textContent = "";
     for (var t = dayStart + 30 * MIN_MS; t < dayEnd; t += 60 * MIN_MS) {
@@ -213,17 +452,36 @@ import { arrange as arrangeColumns } from "./columns.js";
       label.style.top = yOf(t) + "px";
       axis.appendChild(label);
     }
-    // Show this day as saved (a new day starts empty).
-    blocks.forEach(function(b){ if (b.el) b.el.root.remove(); });
-    var doc = saved[dayKey] || {};
-    blocks = (doc.blocks || []).map(function(b){
-      return { id: b.id, task: b.task || "", track: b.track, start: b.start, plan: b.plan,
-               created: b.created, end: b.end == null ? null : b.end,
-               color: (b.color == null ? b.id - 1 : b.color) % PALETTE.length };
+    closeAllBubbles();
+    // Show this day as saved (a new day starts empty). A day written before free placement has
+    // a slot index, or before that a `track` id and a tracks array, whose left-to-right order
+    // maps to a column; either way old columns spread out from the left.
+    blocks.forEach(function(b){
+      if (!b.el) return;
+      b.el.root.remove();
+      b.el.shade.remove();
+      if (b.el.badge) b.el.badge.remove();
     });
-    tracks = (doc.tracks || []).map(function(t){ return { id: t.id, w: t.w }; });
-    blocks.concat(tracks).forEach(function(o){ nextId = Math.max(nextId, o.id + 1); });
-    pruneTracks();
+    var doc = saved[dayKey] || {};
+    var order = (doc.tracks || []).map(function(t){ return t.id; });
+    blocks = (doc.blocks || []).map(function(b){
+      var x = b.x;
+      if (x == null) {
+        var slot = b.slot != null ? b.slot : Math.max(0, order.indexOf(b.track));
+        x = PAD_L + slot * (BLOCK_W + 8);
+      }
+      return { id: b.id, task: b.task || "", x: clampX(x), start: b.start,
+               plan: b.plan, created: b.created, end: b.end == null ? null : b.end,
+               color: (b.color == null ? b.id - 1 : b.color) % PALETTE.length,
+               label: b.label == null ? null : b.label, note: b.note || "",
+               bubbleY: b.bubbleY == null ? null : b.bubbleY };
+    });
+    switches = (doc.switches || []).map(function(g){
+      return { id: g.id, blocks: g.blocks.slice(), from: g.from, to: g.to == null ? null : g.to };
+    });
+    blocks.concat(switches).forEach(function(o){ nextId = Math.max(nextId, o.id + 1); });
+    marks = { wake: doc.wake == null ? null : doc.wake, sleep: doc.sleep == null ? null : doc.sleep };
+    renderMarks();
     render();
   }
 
@@ -255,38 +513,16 @@ import { arrange as arrangeColumns } from "./columns.js";
     root.className = "st-block " + b.state + (b.state === "ahead" ? "" : " started");
     root.style.setProperty("--st-c", PALETTE[b.color]);
     var fill = document.createElement("div"); fill.className = "st-fill";
-    var body = document.createElement("div"); body.className = "st-body";
-    var name = document.createElement("input");
-    name.className = "st-name";
-    name.placeholder = "Name the task";
-    name.spellcheck = false;
-    name.value = b.task;
-    name.readOnly = true;
-    name.classList.toggle("blank", !b.task);
-    name.addEventListener("input", function(){ b.task = name.value; });
-    name.addEventListener("keydown", function(e){ if (e.key === "Enter" || e.key === "Escape") name.blur(); });
-    name.addEventListener("focus", function(){ name.dataset.was = b.task; });
-    name.addEventListener("blur", function(){
-      b.task = name.value.trim();
-      if (b.task !== name.dataset.was) persist();
-      name.value = b.task;
-      name.readOnly = true;
-      name.classList.toggle("blank", !b.task);
-    });
-    body.append(name);
-    root.append(fill, body);
+    root.append(fill);
+    // The halftone shadow is its own element *under* every block (z-index below them), so it
+    // can peek out past this block's bottom-right but never print over a neighbour. It follows
+    // the block through layout, moveDrag and the pulling/dragging classes.
+    var shade = document.createElement("div");
+    shade.className = "st-shade";
     // Hover shows when it starts and how long it is, beside the pointer; right-click for actions.
     root.addEventListener("pointermove", function(e){ showTip(b, e); });
     root.addEventListener("pointerleave", hideTip);
     root.addEventListener("contextmenu", function(e){ e.preventDefault(); openMenu(b, e); });
-    // Double-click a block to name it.
-    root.addEventListener("dblclick", function(e){
-      if (e.target.closest("button")) return;
-      name.readOnly = false;
-      name.classList.remove("blank");
-      name.focus();
-      name.select();
-    });
     var handle = null;
     if (b.state !== "done") {
       handle = document.createElement("div");
@@ -299,16 +535,117 @@ import { arrange as arrangeColumns } from "./columns.js";
       startEdge.addEventListener("pointerdown", function(e){ grabStart(b, e); });
       root.append(handle, startEdge);
     }
-    b.el = { root: root, fill: fill, name: name, handle: handle };
-    lane.append(root);
-    if (b.col) layout(b, null, now);
+    b.el = { root: root, fill: fill, handle: handle, badge: null, shade: shade };
+    syncBadge(b);
+    lane.append(shade, root);
+    layout(b, null, now);
   }
 
   function remount(b){
-    var editing = document.activeElement === b.el.name;
     b.el.root.remove();
+    b.el.shade.remove();
+    if (b.el.badge) b.el.badge.remove();
     mount(b);
-    if (editing) { b.el.name.readOnly = false; b.el.name.classList.remove("blank"); b.el.name.focus(); }
+  }
+
+  // The pulling/dragging classes (they kill the slide transition) go to the shade and badge too.
+  function mark(b, cls, on){
+    b.el.root.classList.toggle(cls, on);
+    b.el.shade.classList.toggle(cls, on);
+    if (b.el.badge) b.el.badge.classList.toggle(cls, on);
+  }
+
+  // The badge on a labeled block: a mini bubble — rounded box, sharp tail — wearing the first
+  // couple of words of the label. Clicking it pops the big bubble out of it.
+  function syncBadge(b){
+    var want = b.label != null;
+    if (!want) {
+      if (b.el.badge) { b.el.badge.remove(); b.el.badge = null; }
+      return;
+    }
+    if (b.el.badge) {   // relabeled: just re-dress it (its width, and so its tail, may change)
+      b.el.badge.firstChild.textContent = labelNameOf(b) || "";
+      b.el.badge.title = labelNameOf(b) || "";
+      placeBadge(b);
+      return;
+    }
+    var badge = document.createElement("button");
+    badge.type = "button";
+    badge.className = "st-bub-icon";
+    badge.title = labelNameOf(b) || "";
+    var txt = document.createElement("span");
+    txt.textContent = labelNameOf(b) || "";
+    badge.append(txt);
+    badge.insertAdjacentHTML("beforeend",
+      '<svg class="st-bub-tail" aria-hidden="true"><polyline /></svg>');
+    badge.addEventListener("pointerdown", function(e){ badgeDrag(b, e); });
+    if (bubbles[b.id]) badge.style.visibility = "hidden";   // its bubble is out
+    // The badge lives in the lane, not in the block, at a z above every block — so no
+    // neighbour can ever cover it. placeBadge keeps it pinned to its block.
+    lane.append(badge);
+    b.el.badge = badge;
+    placeBadge(b);
+  }
+
+  // Pin the badge to its block at bubbleY below the block's top. The tail is short and fixed;
+  // the badge is shifted sideways so the tail's tip lands on the block's centre line. It sits
+  // to the right of the centre, or to the left (flipped) near the panel's edge.
+  var TAIL_TIP = 7;   // px: the tail tip's x from the box's inner edge on the tail's side
+  function placeBadge(b){
+    var r = b.el;
+    if (!r || !r.badge) return;
+    // The centre from the inline left/width — where the block is going — not offsetLeft, which
+    // reads the start of a slide, so the badge would stay behind a block sliding away.
+    var rootTop = r.root.offsetTop;
+    var centre = parseFloat(r.root.style.left) + parseFloat(r.root.style.width) / 2;
+    var flip = b.x > maxX() - 70;
+    var inner = r.badge.clientWidth;   // the padding box, inside the 2-px border
+    var tip = flip ? inner - TAIL_TIP : TAIL_TIP;
+    r.badge.classList.toggle("flip", flip);
+    r.badge.style.top = (rootTop + (b.bubbleY == null ? -8 : b.bubbleY)) + "px";
+    r.badge.style.left = (centre - BADGE_INK - tip) + "px";
+    // in the tail's coordinates: x from the padding box, y = 0 at the bottom border's inner edge
+    var a = flip ? inner - 12 : 4, z = flip ? inner - 4 : 12;
+    r.badge.querySelector("polyline").setAttribute("points",
+      a + ",-1 " + tip + ",9 " + z + ",-1");
+  }
+
+  // Press the badge and drag up or down to slide it along the block (bubbleY, remembered);
+  // a press that doesn't move is a click, which pops the bubble out of it.
+  function badgeDrag(b, e){
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    var badge = b.el.badge;
+    try { badge.setPointerCapture(e.pointerId); } catch (_) {}
+    var y0 = e.clientY, t0 = parseFloat(badge.style.top) || 0, moved = false;
+    var rootTop = b.el.root.offsetTop;
+    function mv(ev){
+      if (ev.pointerId !== e.pointerId) return;
+      var dy = ev.clientY - y0;
+      if (!moved && Math.abs(dy) < 4) return;
+      moved = true;
+      var hi = rootTop + Math.max(-8, b.el.root.offsetHeight - 16);
+      badge.style.top = Math.max(rootTop - 8, Math.min(hi, t0 + dy)) + "px";
+    }
+    function up(ev){
+      if (ev.pointerId !== e.pointerId) return;
+      badge.removeEventListener("pointermove", mv);
+      badge.removeEventListener("pointerup", up);
+      badge.removeEventListener("pointercancel", up);
+      if (!moved) {
+        if (ev.type !== "pointercancel") {
+          if (bubbles[b.id]) closeBubble(b);
+          else openBubble(b);
+        }
+        return;
+      }
+      var t = parseFloat(badge.style.top) - rootTop;
+      if (t !== b.bubbleY) { b.bubbleY = t; persist(); }
+    }
+    badge.addEventListener("pointermove", mv);
+    badge.addEventListener("pointerup", up);
+    badge.addEventListener("pointercancel", up);
   }
 
   // Position a block. `planPx` overrides the plan's length while it's being pulled or settling.
@@ -325,26 +662,49 @@ import { arrange as arrangeColumns } from "./columns.js";
       height = planPx;
       solid = 0;
     }
-    var col = b.col || { left: PAD_L, width: lane.clientWidth - PAD_L - PAD_R };
-    var inset = Math.min(b.inset || 0, col.width * 0.15);   // squeezed while it's being pulled
-    r.root.style.top = (yOf(b.start) - height) + "px";   // it starts at the bottom and grows up
+    var inset = Math.min(b.inset || 0, BLOCK_W * 0.15);   // squeezed while it's being pulled
+    var top = yOf(b.start) - height;                      // it starts at the bottom and grows up
+    // Back-to-back blocks in a queue share one outline: when the block above starts exactly
+    // where this one ends, this box grows one border up so the two borders print as one line
+    // (same ink, so the overlap is invisible). Skipped mid-pull, where height is transient.
+    if (planPx === b.plan * PX || b.state === "done") {
+      var n = nextAfter(b);
+      if (n && Math.abs(top - yOf(n.start)) < 0.75) { top -= INK; height += INK; }
+    }
+    var left = b.x + inset, width = Math.max(8, BLOCK_W - 2 * inset);
+    r.root.style.top = top + "px";
     r.root.style.height = height + "px";
-    r.root.style.left = (col.left + inset) + "px";
-    r.root.style.width = Math.max(8, col.width - 2 * inset) + "px";
-    r.fill.style.height = solid + "px";
+    r.root.style.left = left + "px";
+    r.root.style.width = width + "px";
+    r.fill.style.height = Math.max(0, Math.min(solid, height - 2 * INK)) + "px";   // inside the outline
+    r.shade.style.top = (top + SHADE_Y) + "px";
+    r.shade.style.height = height + "px";
+    r.shade.style.left = (left + SHADE_X) + "px";
+    r.shade.style.width = width + "px";
+    placeBadge(b);
+    placeTiesOf(b);
     if (r.handle) r.handle.style.top = "0px";   // the top edge is always the planned end
   }
 
-  // What the hover label says about a block.
+  // What the hover label says about a block. Focused time is wall time minus the share spent
+  // on the other members while switching — elapsed vs CPU time.
   function infoOf(b, now){
     if (b.state === "done") {
       var end = endOf(b, now);
-      return clock(b.start) + "–" + clock(end) + " · " + minsBetween(b.start, end) + " min";
+      var mins = minsBetween(b.start, end);
+      var fd = Math.floor(focusedMs(b.id, b.start, end, switches) / MIN_MS);
+      return clock(b.start) + "–" + clock(end) + " · " + mins + " min" +
+        (fd < mins ? ", ~" + fd + " focused" : "");
     }
     if (b.state === "running") {
       var e = minsBetween(b.start, now);
+      var f = Math.floor(focusedMs(b.id, b.start, Math.min(now, extentOf(b, now)), switches) / MIN_MS);
       if (e > b.plan) return clock(b.start) + "–" + clock(b.start + b.plan * MIN_MS) + " · time up, pull to continue";
-      return "since " + clock(b.start) + " · " + e + " of " + b.plan + " min";
+      var label = "since " + clock(b.start) + " · " + e + " of " + b.plan + " min";
+      var g = activeGroupOf(b);
+      if (g) label += " · switching ×" + g.blocks.length + ", ~" + f + " min focused";
+      else if (f < e) label += " · ~" + f + " min focused";
+      return label;
     }
     return clock(b.start) + " · " + b.plan + " min";
   }
@@ -355,9 +715,10 @@ import { arrange as arrangeColumns } from "./columns.js";
   tip.hidden = true;
   lane.append(tip);
   function showTip(b, e){
-    if (pull || press || move || split || menu) { hideTip(); return; }
+    if (pull || press || move || drag || menu) { hideTip(); return; }
     var box = lane.getBoundingClientRect();
-    tip.textContent = infoOf(b, Date.now());
+    var nm = labelNameOf(b);
+    tip.textContent = (nm ? nm + " · " : "") + infoOf(b, Date.now());
     tip.hidden = false;
     var x = e.clientX - box.left + 14, y = e.clientY - box.top + 16;
     tip.style.left = Math.max(4, Math.min(box.width - tip.offsetWidth - 4, x)) + "px";
@@ -366,45 +727,411 @@ import { arrange as arrangeColumns } from "./columns.js";
   function hideTip(){ tip.hidden = true; }
 
   var menu = null;
-  function openMenu(b, e){
+  // A right-click menu: newMenu() makes an empty one, showMenu() puts it at the pointer.
+  function newMenu(){
     closeMenu();
     cancelPress();
     hideTip();
-    var box = lane.getBoundingClientRect();
     var el = document.createElement("div");
     el.className = "st-menu";
     el.setAttribute("role", "menu");
-    if (b.state === "running") el.append(button("Done", "", "Stop it now", function(){ closeMenu(); finish(b); }));
-    el.append(button("Remove", "", "Remove this block", function(){ closeMenu(); remove(b); }));
+    return el;
+  }
+  function showMenu(el, e){
+    var box = lane.getBoundingClientRect();
     lane.append(el);
     el.style.left = Math.max(4, Math.min(box.width - el.offsetWidth - 4, e.clientX - box.left)) + "px";
     el.style.top = (e.clientY - box.top) + "px";
     menu = el;
     el.firstChild.focus();
   }
+  function openMenu(b, e){
+    var el = newMenu();
+    var now = Date.now();
+    if (b.state === "running") {
+      el.append(button("Done", "", "Stop it now", function(){ closeMenu(); finish(b); }));
+    }
+    if (b.state === "running" && following) {   // switching is about now, so only today
+      var g = activeGroupOf(b);
+      if (g) el.append(button("Stop switching", "", "These run in parallel again",
+        function(){ closeMenu(); endSwitch(g); }));
+      if ((g ? g.blocks.length : 1) < SWITCH_MAX) {
+        blocks.forEach(function(o){
+          if (o === b || stateOf(o, now) !== "running" || activeGroupOf(o)) return;
+          el.append(button("Switch with " + labelOf(o), "", "Mark these as switched between, not parallel",
+            function(){ closeMenu(); joinSwitch(b, o); }));
+        });
+      }
+    }
+    var kin = kinOf(b);
+    if (kin.length > 1 && kin.some(function(o){ return o.x !== b.x; })) {
+      el.append(button("Align", "", "Line up every " + labelOf(b) + " block here",
+        function(){ closeMenu(); align(b); }));
+    }
+    el.append(button("Remove", "", "Remove this block", function(){ closeMenu(); remove(b); }));
+    // Labels: the block's type. Every label ever added is here to pick from; the current one is
+    // ticked, and picking it again takes it off. The input at the bottom adds a new one.
+    var sep = document.createElement("div");
+    sep.className = "st-menu-sep";
+    el.append(sep);
+    // Archived labels are left out, except this block's own (ticked, so it can be taken off).
+    // The × beside a label archives it: it leaves the list, blocks that wear it keep it.
+    labels.slice().sort(function(a, c){ return a.name.localeCompare(c.name); }).forEach(function(l){
+      var cur = b.label === l.id;
+      if (l.archived && !cur) return;
+      var row = document.createElement("div");
+      row.className = "st-menu-label";
+      row.append(button((cur ? "✓ " : "") + l.name, "label",
+        cur ? "Take this label off" : "Label it " + l.name, function(){
+          closeMenu();
+          setLabel(b, cur ? null : l.id);
+        }));
+      if (!l.archived) row.append(button("×", "del", "Delete this label from the list (blocks keep it)",
+        function(){ archiveLabel(l); row.remove(); }));
+      el.append(row);
+    });
+    var ni = document.createElement("input");
+    ni.className = "st-menu-new";
+    ni.placeholder = labels.some(function(l){ return !l.archived; }) ? "New label…" : "Label it…";
+    ni.spellcheck = false;
+    ni.addEventListener("pointerdown", function(e){ e.stopPropagation(); });
+    ni.addEventListener("keydown", function(e){
+      e.stopPropagation();
+      if (e.key === "Escape") { closeMenu(); return; }
+      if (e.key !== "Enter") return;
+      var l = addLabel(ni.value);
+      if (!l) return;
+      closeMenu();
+      setLabel(b, l.id);
+    });
+    el.append(ni);
+    showMenu(el, e);
+  }
   function closeMenu(){
     if (menu) { menu.remove(); menu = null; }
   }
+  // How a menu item names another block: its label, a typed name from before labels, or its time.
+  function labelOf(b){
+    var n = labelNameOf(b) || b.task;
+    if (!n) return "the " + shortClock(b.start) + " block";
+    return "“" + (n.length > 16 ? n.slice(0, 15) + "…" : n) + "”";
+  }
+  function setLabel(b, id){
+    b.label = id;
+    closeBubble(b);
+    syncBadge(b);
+    rebuildTies();
+    persist();
+  }
   document.addEventListener("pointerdown", function(e){
     if (menu && !menu.contains(e.target)) closeMenu();
+    if (cal && !cal.contains(e.target) && !calBtn.contains(e.target)) closeCal();
+    // the bubble doesn't close on clicks elsewhere: it stays out until its "−" (or Escape)
   }, true);
 
+  /* ---------- the speech bubbles: what a labeled block is, and a small note on it ---------- */
+  // A big bubble pops out of its badge: it appears with its tail at the icon's spot (the icon
+  // goes away while it's out) and stays until its "−" shrinks it back — several can be left out
+  // at once, one per block. Each is one SVG, like the reference art: a rounded box with a sharp
+  // tail, whose halftone shadow is the same path offset down-right and painted first, so the
+  // opaque bubble covers the overlap — nothing is clipped, the tail stays sharp.
+  var bubbles = {};   // the open bubbles, by block id
+  var BUB_PATH = "M22 8 L158 8 Q172 8 172 22 L172 80 Q172 94 158 94 L74 94 " +
+                 "L46 122 L54 94 L22 94 Q8 94 8 80 L8 22 Q8 8 22 8 Z";
+  var BUB_W = 190, BUB_H = 140, TAIL_X = 46, TAIL_Y = 122;   // the tail tip, in bubble px
+  function openBubble(b){
+    if (bubbles[b.id]) return;
+    closeMenu();
+    hideTip();
+    var el = document.createElement("div");
+    el.className = "st-bubble";
+    el.innerHTML =
+      '<svg viewBox="0 0 ' + BUB_W + " " + BUB_H + '" aria-hidden="true">' +
+      // the halftone tile at 5 px, the same density as the blocks' shadows
+      '<defs><pattern id="st-ht-' + b.id + '" width="5" height="5" patternUnits="userSpaceOnUse">' +
+      '<circle cx="1.25" cy="1.25" r="1.07"/><circle cx="3.75" cy="3.75" r="1.07"/>' +
+      "</pattern></defs>" +
+      '<path class="shade" transform="translate(11,11)" d="' + BUB_PATH + '" fill="url(#st-ht-' + b.id + ')"/>' +
+      '<path class="face" d="' + BUB_PATH + '"/>' +
+      "</svg>";
+    var inner = document.createElement("div");
+    inner.className = "st-bub-inner";
+    var head = document.createElement("div");
+    head.className = "st-bub-head";
+    var name = document.createElement("div");
+    name.className = "st-bub-name";
+    name.textContent = labelNameOf(b) || "";
+    var min = button("−", "st-bub-min", "Shrink back to the icon", function(){ closeBubble(b); });
+    head.append(name, min);
+    var note = document.createElement("textarea");
+    note.className = "st-bub-note";
+    note.placeholder = "A small note…";
+    note.rows = 2;
+    note.spellcheck = false;
+    note.value = b.note || "";
+    function saveNote(){
+      var v = note.value.trim();
+      if (v !== b.note) { b.note = v; persist(); }
+    }
+    note.addEventListener("blur", saveNote);
+    note.addEventListener("keydown", function(e){
+      e.stopPropagation();
+      if (e.key === "Escape") closeBubble(b);
+    });
+    inner.append(head, note);
+    el.append(inner);
+    lane.append(el);
+    // The tail tip lands on the block's centre line, at the badge's height; the badge hides
+    // while the bubble is out. The bubble opens up-right, or mirrored to up-left when there's
+    // no room.
+    var badge = b.el.badge;
+    var cx = b.el.root.offsetLeft + b.el.root.offsetWidth / 2;
+    var cy = badge.offsetTop + badge.offsetHeight / 2;
+    var left = cx - TAIL_X;
+    if (left + BUB_W > lane.clientWidth + 10) {
+      left = cx - (BUB_W - TAIL_X);
+      el.classList.add("flip");
+    }
+    el.style.left = Math.max(2 - 8, left) + "px";
+    el.style.top = Math.max(2, cy - TAIL_Y) + "px";
+    b.el.badge.style.visibility = "hidden";
+    bubbles[b.id] = { el: el, b: b, save: saveNote };
+  }
+  function closeBubble(b){
+    var k = bubbles[b.id];
+    if (!k) return;
+    k.save();
+    k.el.remove();
+    if (b.el && b.el.badge) b.el.badge.style.visibility = "";
+    delete bubbles[b.id];
+  }
+  function closeAllBubbles(){
+    Object.keys(bubbles).forEach(function(id){ closeBubble(bubbles[id].b); });
+  }
+
+  /* ---------- getting up and going to bed ---------- */
+  // At most one of each a day, kept in the day record as `wake` and `sleep` (ms). Each is a small
+  // bubble just right of the axis, its tail pointing at the time, which it also shows. Right-click
+  // a blank spot to put one there (or move it there, if the day has one); drag it up or down to
+  // the exact minute; right-click it to take it off.
+  var MARKS = { wake: "Got out of bed!", sleep: "Going to bed!" };
+  var markEls = {};
+  function renderMarks(){
+    Object.keys(MARKS).forEach(function(kind){
+      var el = markEls[kind];
+      if (marks[kind] == null) {
+        if (el) { el.remove(); delete markEls[kind]; }
+        return;
+      }
+      if (!el) {
+        el = document.createElement("div");
+        el.className = "st-mark";
+        el.title = "Drag to the exact time · right-click to remove";
+        el.innerHTML = "<b></b><time></time>" +
+          '<svg class="st-mark-tail" aria-hidden="true"><polyline points="1,-5 -11,0 1,5" /></svg>';
+        el.firstChild.textContent = MARKS[kind];
+        el.addEventListener("pointerdown", function(e){ markDrag(kind, e); });
+        el.addEventListener("contextmenu", function(e){
+          e.preventDefault();
+          var m = newMenu();
+          m.append(button("Remove", "", "Take this mark off", function(){ closeMenu(); setMark(kind, null); }));
+          showMenu(m, e);
+        });
+        lane.append(el);
+        markEls[kind] = el;
+      }
+      placeMark(kind, marks[kind]);
+    });
+  }
+  function placeMark(kind, ts){
+    markEls[kind].style.top = yOf(ts) + "px";
+    markEls[kind].querySelector("time").textContent = clock(ts);
+  }
+  // To the minute, inside the day.
+  function clampMark(ts){
+    return Math.max(dayStart, Math.min(dayEnd - MIN_MS, Math.round(ts / MIN_MS) * MIN_MS));
+  }
+  function setMark(kind, ts){
+    marks[kind] = ts;
+    renderMarks();
+    if (ts != null && !reduceMotion.matches) markEls[kind].animate(
+      [{ transform: "translateY(-50%) scale(.6)", opacity: .2 }, { transform: "translateY(-50%)", opacity: 1 }],
+      { duration: 240, easing: "cubic-bezier(.2,.9,.3,1.35)" });
+    persist();
+  }
+  // Drag 1:1, a minute at a time; the time inside follows. Scrolling mid-drag counts too.
+  function markDrag(kind, e){
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    hideTip();
+    var el = markEls[kind];
+    try { el.setPointerCapture(e.pointerId); } catch (_) {}
+    var y0 = e.clientY, s0 = scroller.scrollTop, t0 = marks[kind], at = t0;
+    el.classList.add("dragging");
+    function mv(ev){
+      if (ev.pointerId !== e.pointerId) return;
+      var dy = ev.clientY - y0 + (scroller.scrollTop - s0);
+      at = clampMark(t0 - dy / PX * MIN_MS);   // up is later
+      placeMark(kind, at);
+    }
+    function up(ev){
+      if (ev.pointerId !== e.pointerId) return;
+      el.removeEventListener("pointermove", mv);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+      el.classList.remove("dragging");
+      if (ev.type === "pointercancel") at = t0;
+      if (marks[kind] !== t0) return;   // the day changed under the drag
+      placeMark(kind, at);
+      if (at !== t0) { marks[kind] = at; persist(); }
+    }
+    el.addEventListener("pointermove", mv);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  }
+  // Right-click a blank spot: put a mark there.
+  lane.addEventListener("contextmenu", function(e){
+    if (e.target.closest(".st-block, .st-bub-icon, .st-bubble, .st-menu, .st-mark, .st-die")) return;
+    e.preventDefault();
+    if (pull || move || drag || storageDown) return;
+    var ts = clampMark(tsAt(e.clientY - lane.getBoundingClientRect().top));
+    var el = newMenu();
+    Object.keys(MARKS).forEach(function(kind){
+      el.append(button(MARKS[kind], "", (marks[kind] == null ? "Mark it at " : "Move it to ") + clock(ts),
+        function(){ closeMenu(); setMark(kind, ts); }));
+    });
+    showMenu(el, e);
+  });
+
+  /* ---------- the calendar: open another day ---------- */
+  // The icon at the top right opens a month. Days with something in them have a dot; today is
+  // ringed and the day on show is filled. Any day can be opened: a past one to look back (and
+  // touch up), a future one to plan — its blocks are saved under its date like any day's, so
+  // they're simply there when it comes.
+  var calBtn = $("st-cal-btn"), cal = null, calMonth = null;
+  calBtn.addEventListener("click", function(){ if (cal) closeCal(); else openCal(); });
+  $("st-today").addEventListener("click", function(){ showDay(dayKeyAt(Date.now())); });
+  function showDay(key){
+    closeCal();
+    buildDay(key);
+    scrollToDay();
+  }
+  function openCal(){
+    var p = dayKey.split("-");
+    calMonth = { y: +p[0], m: +p[1] - 1 };
+    cal = document.createElement("div");
+    cal.className = "st-cal";
+    cal.setAttribute("role", "dialog");
+    cal.setAttribute("aria-label", "Pick a day");
+    $("stretch").append(cal);
+    calBtn.setAttribute("aria-expanded", "true");
+    drawCal();
+  }
+  function stepMonth(d){
+    var t = new Date(calMonth.y, calMonth.m + d, 1);
+    calMonth = { y: t.getFullYear(), m: t.getMonth() };
+    drawCal();
+  }
+  function hasDay(key){
+    var d = saved[key];
+    return !!d && ((d.blocks || []).length > 0 || d.wake != null || d.sleep != null);
+  }
+  function drawCal(){
+    var today = dayKeyAt(Date.now());
+    cal.textContent = "";
+    var head = document.createElement("div");
+    head.className = "st-cal-head";
+    var title = document.createElement("b");
+    title.textContent = new Date(calMonth.y, calMonth.m, 1).toLocaleDateString(undefined,
+      { month:"long", year:"numeric" });
+    head.append(button("‹", "st-cal-nav", "Previous month", function(){ stepMonth(-1); }), title,
+      button("›", "st-cal-nav", "Next month", function(){ stepMonth(1); }));
+    var grid = document.createElement("div");
+    grid.className = "st-cal-grid";
+    ["S", "M", "T", "W", "T", "F", "S"].forEach(function(w){
+      var s = document.createElement("span");
+      s.textContent = w;
+      grid.append(s);
+    });
+    monthCells(calMonth.y, calMonth.m).forEach(function(c){
+      var p = c.key.split("-");
+      var d = button(String(+p[2]), "st-cal-day",
+        new Date(+p[0], +p[1] - 1, +p[2]).toLocaleDateString(undefined, { weekday:"long", month:"long", day:"numeric" }),
+        function(){ showDay(c.key); });
+      d.classList.toggle("out", !c.inMonth);
+      d.classList.toggle("today", c.key === today);
+      d.classList.toggle("on", c.key === dayKey);
+      d.classList.toggle("has", hasDay(c.key));
+      grid.append(d);
+    });
+    cal.append(head, grid);
+  }
+  function closeCal(){
+    if (!cal) return;
+    cal.remove();
+    cal = null;
+    calBtn.setAttribute("aria-expanded", "false");
+  }
+
   /* ---------- storage ---------- */
-  // Write the whole day: its blocks (data only) and its tracks. Writes are queued in order by
-  // the bridge, so the last one is the day as it stands.
+  // Write the whole day: its blocks (data only) and its switching groups. Writes are queued in
+  // order by the bridge, so the last one is the day as it stands.
   function persist(){
     if (storageDown) return;
     var doc = {
       date: dayKey,
       blocks: blocks.map(function(b){
-        return { id: b.id, task: b.task, track: b.track, start: b.start, plan: b.plan,
-                 created: b.created, end: b.end, color: b.color };
+        return { id: b.id, task: b.task, x: b.x, start: b.start, plan: b.plan,
+                 created: b.created, end: b.end, color: b.color, label: b.label, note: b.note,
+                 bubbleY: b.bubbleY };
       }),
-      tracks: tracks.map(function(t){ return { id: t.id, w: t.w }; }),
+      switches: switches.map(function(g){
+        return { id: g.id, blocks: g.blocks.slice(), from: g.from, to: g.to };
+      }),
+      wake: marks.wake,
+      sleep: marks.sleep,
       updatedAt: Date.now()
     };
     saved[dayKey] = doc;
     window.stretch.putDay(doc).catch(function(err){ say("Not saved: " + err); });
+  }
+
+  /* ---------- labels: task types, global across days ---------- */
+  // Labels live in their own record, keyed "labels" where the days are keyed by date — to Rust
+  // it's one more opaque day image (it only reads `date`), replayed the same way. Blocks point
+  // at labels by id, so a rename would reach every day that uses it. Deleting a label archives
+  // it: it stays in the record (blocks that wear it keep their name and badge, on any day) but
+  // leaves the menu's list.
+  function labelById(id){ return labels.find(function(l){ return l.id === id; }); }
+  function labelNameOf(b){ var l = b.label == null ? null : labelById(b.label); return l ? l.name : null; }
+  function persistLabels(){
+    if (storageDown) return;
+    var doc = { date: "labels",
+                labels: labels.map(function(l){ return { id: l.id, name: l.name, archived: l.archived }; }),
+                updatedAt: Date.now() };
+    saved.labels = doc;
+    window.stretch.putDay(doc).catch(function(err){ say("Not saved: " + err); });
+  }
+  // Add a label by name; an existing name (case-insensitively) is reused, not duplicated — an
+  // archived one comes back to the list, same id.
+  function addLabel(name){
+    name = name.trim();
+    if (!name) return null;
+    var have = labels.find(function(l){ return l.name.toLowerCase() === name.toLowerCase(); });
+    if (have) {
+      if (have.archived) { have.archived = false; persistLabels(); }
+      return have;
+    }
+    var l = { id: nextLabelId++, name: name.slice(0, 40), archived: false };
+    labels.push(l);
+    persistLabels();
+    return l;
+  }
+  function archiveLabel(l){
+    l.archived = true;
+    persistLabels();
+    say("Deleted “" + l.name + "” from the list.");
   }
 
   /* ---------- actions ---------- */
@@ -419,9 +1146,8 @@ import { arrange as arrangeColumns } from "./columns.js";
   // when it's full a 30-minute block appears centred on it. Keep holding and pull it longer.
   // There's no pointer capture during the hold, so a quick double-click still reaches the block.
   lane.addEventListener("pointerdown", function(e){
-    if (e.button !== 0 || pull || press || move || split || storageDown) return;
-    if (e.target.closest("button, .st-handle, .st-split, .st-menu")) return;
-    if (e.target.matches(".st-name:not([readonly])")) return;
+    if (e.button !== 0 || pull || press || move || drag || storageDown || dieBusy()) return;
+    if (e.target.closest("button, .st-handle, .st-menu, .st-bubble, .st-die, .st-mark")) return;
     e.preventDefault();
     hideTip();
     var box = lane.getBoundingClientRect();
@@ -432,7 +1158,9 @@ import { arrange as arrangeColumns } from "./columns.js";
     ring.style.animationDuration = HOLD_MS + "ms";
     ring.style.setProperty("--st-c", PALETTE[nextColor()]);   // the colour the block will be
     lane.append(ring);
+    var overEl = e.target.closest(".st-block");
     press = { pointer: e.pointerId, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY,
+              over: overEl && blocks.find(function(b){ return b.el && b.el.root === overEl; }),
               ring: ring, timer: setTimeout(placeBlock, HOLD_MS) };
   });
 
@@ -450,35 +1178,12 @@ import { arrange as arrangeColumns } from "./columns.js";
     press = null;
   }
 
-  // Where a new block starting at `start` can go in track `t`, or null if that time is taken.
-  // A press just inside a block's last few minutes follows that block instead of going beside it.
-  function fitIn(t, start, now){
-    var s = start;
-    for (var pass = 0; pass < 2; pass++) {
-      var clash = blocks.find(function(o){
-        return o.track === t.id && o.start < s + MIN_PLAN * MIN_MS && s < extentOf(o, now);
-      });
-      if (!clash) return s;
-      var end = extentOf(clash, now);
-      if (pass > 0 || clash.start >= s || end - s > TAIL_MIN * MIN_MS) return null;
-      s = snapUp(end);
-    }
-    return null;
-  }
-
-  // A new track takes 1 / (n + 1) of the width it shares with the n tracks already running
-  // there; they keep their proportions to each other.
-  function newTrack(start, end){
-    var shared = [];
-    clusters.forEach(function(c){
-      if (c.from < end && start < c.to) c.cols.forEach(function(k){
-        if (shared.indexOf(k.track) < 0) shared.push(k.track);
-      });
+  // The block (other than `b`) that a block at `x` starting at `start` would sit on.
+  function clashAt(x, start, now, b){
+    return blocks.find(function(o){
+      return o !== b && Math.abs(o.x - x) < BLOCK_W &&
+        o.start < start + MIN_PLAN * MIN_MS && start < extentOf(o, now);
     });
-    var sum = shared.reduce(function(s, t){ return s + t.w; }, 0);
-    var t = { id: nextId++, w: shared.length ? sum / shared.length : 1 };
-    tracks.push(t);
-    return t;
   }
 
   function placeBlock(){
@@ -487,41 +1192,57 @@ import { arrange as arrangeColumns } from "./columns.js";
     p.ring.remove();
     var now = Date.now();
     var box = lane.getBoundingClientRect();
-    // The block appears centred on the pointer, so you're holding its middle.
+    // The press point is the block's start — its bottom edge. The die is thrown right there,
+    // bounces on the start line, and the block sprouts up from it by the rolled minutes.
     var mid = tsAt(p.y - box.top);
-    var start0 = snapDown(mid - DEFAULT_PLAN / 2 * MIN_MS + SNAP / 2 * MIN_MS);   // nearest 5-minute step
+    var start0 = snapDown(mid + SNAP / 2 * MIN_MS);   // nearest 5-minute step
     // Pressed at or after now: start no earlier than now. Holding at the now line means "start
-    // this now", not "a quarter of an hour ago".
+    // this now", not "a few minutes ago".
     if (mid >= now - 2 * MIN_MS) start0 = Math.max(start0, snapDown(now));
-    // Try the column under the pointer first, then the other tracks from the left; if that time is
-    // taken in all of them, start a new track beside them.
-    arrange(now);
-    var order = tracks.slice(), x = p.x - box.left;
-    var here = clusters.find(function(c){ return c.from <= mid && mid < c.to; });
-    var under = here && here.cols.find(function(k){ return x >= k.x0 && x < k.x1; });
-    if (under) order = [under.track].concat(order.filter(function(t){ return t !== under.track; }));
-    var track = null, start = start0;
-    for (var i = 0; i < order.length && !track; i++) {
-      var s = fitIn(order[i], start0, now);
-      if (s != null) { track = order[i]; start = s; }
+    // The block goes where it was pressed. A press just inside a block's last few minutes
+    // follows that block instead of landing on it; otherwise a taken spot nudges the new block
+    // to the nearest free x.
+    var x0 = clampX(p.x - box.left - BLOCK_W / 2), x = x0, start = start0;
+    var clash = clashAt(x, start, now, null);
+    if (clash && clash.start < start && extentOf(clash, now) - start <= TAIL_MIN * MIN_MS) {
+      start = snapUp(extentOf(clash, now));
+      clash = clashAt(x, start, now, null);
     }
-    if (!track) track = newTrack(start0, start0 + DEFAULT_PLAN * MIN_MS);
+    for (var d = 4; clash && d < lane.clientWidth; d += 4) {
+      if (clampX(x0 + d) === x0 + d && !clashAt(x0 + d, start, now, null)) { x = x0 + d; clash = null; }
+      else if (clampX(x0 - d) === x0 - d && !clashAt(x0 - d, start, now, null)) { x = x0 - d; clash = null; }
+    }
+    if (clash) { say("No room for a block here."); return; }
 
-    var b = { id: nextId++, task: "", track: track.id, start: start, plan: DEFAULT_PLAN, created: now, end: null,
-              color: nextColor() };
+    var b = { id: nextId++, task: "", x: x, start: start, plan: MIN_PLAN, created: now, end: null,
+              color: nextColor(), label: null, note: "", bubbleY: null };
     var room = roomAfter(b);
-    if (room < MIN_PLAN) { pruneTracks(); say("No room for a block here."); return; }
-    b.plan = Math.min(DEFAULT_PLAN, room);
-    blocks.push(b);
-    // A block placed behind now may end one that was still going, so bring them all up to date.
-    render();
-    b.el.root.classList.add("fresh");   // the name field waits until the block is placed
-    if (!reduceMotion.matches) {
-      b.el.root.animate([{ transform: "scale(.92, .6)", opacity: .2 }, { transform: "none", opacity: 1 }],
-        { duration: 280, easing: "cubic-bezier(.2,.9,.3,1.35)" });
-    }
-    try { lane.setPointerCapture(p.pointer); } catch (_) {}
-    beginPull(b, p.pointer, p.x, p.y, true);
+    if (room < MIN_PLAN) { say("No room for a block here."); return; }
+    // Roll for the length: the die bounces on the start line, and the block appears when it
+    // lands. The rolled number is clamped into the room there; shrink or stretch it after.
+    var rolled = ROLL_MIN + SNAP * Math.floor(Math.random() * ((ROLL_MAX - ROLL_MIN) / SNAP + 1));
+    var key = dayKey;
+    rollDie(lane, x + BLOCK_W / 2, yOf(start), rolled, function(n){
+      var then = Date.now();
+      if (dayKey !== key) return;                                   // the view moved to another day mid-roll
+      if (clashAt(b.x, b.start, then, null)) { say("No room there any more."); return; }
+      b.plan = Math.max(MIN_PLAN, Math.min(n, roomAfter(b)));
+      blocks.push(b);
+      // A block placed behind now may end one that was still going, so bring them all up to date.
+      render();
+      if (!reduceMotion.matches) {
+        b.el.root.animate([{ transform: "scale(.92, .6)", opacity: .2 }, { transform: "none", opacity: 1 }],
+          { duration: 280, easing: "cubic-bezier(.2,.9,.3,1.35)" });
+      }
+      var tag = document.createElement("div");
+      tag.className = "st-tag above";
+      tag.textContent = "rolled " + n + (b.plan < n ? " min, " + b.plan + " fit" : " min");
+      tag.style.top = (yOf(b.start) - b.plan * PX) + "px";
+      tag.style.left = (b.x + 4) + "px";
+      lane.append(tag);
+      setTimeout(function(){ tag.remove(); }, 2000);
+      persist();
+    });
   }
 
   // Done ends the block where it stands: now, or its planned end if that has already passed
@@ -533,10 +1254,12 @@ import { arrange as arrangeColumns } from "./columns.js";
   }
   function remove(b){
     hideTip();
+    closeBubble(b);
     b.el.root.remove();
+    b.el.shade.remove();
+    if (b.el.badge) b.el.badge.remove();
     blocks = blocks.filter(function(o){ return o !== b; });
-    pruneTracks();
-    render();
+    render();   // tick closes any switching group the block was in
     persist();
   }
 
@@ -549,7 +1272,7 @@ import { arrange as arrangeColumns } from "./columns.js";
   }
 
   function grabHandle(b, e){
-    if (e.button !== 0 || pull || press || move || split) return;
+    if (e.button !== 0 || pull || press || move || drag) return;
     e.preventDefault();
     e.stopPropagation();
     try { e.target.setPointerCapture(e.pointerId); } catch (_) {}
@@ -573,7 +1296,7 @@ import { arrange as arrangeColumns } from "./columns.js";
              max: Math.max(MIN_PLAN, roomAfter(b)),
              edge: px, v: 0, want: px, last: performance.now(),
              created: created, tag: tag, band: band };
-    b.el.root.classList.add("pulling");
+    mark(b, "pulling", true);
     requestAnimationFrame(pullFrame);
   }
 
@@ -608,14 +1331,14 @@ import { arrange as arrangeColumns } from "./columns.js";
 
     // The band from the edge to the pointer: thinner the further it's stretched.
     var gap = (base - p.edge) - (p.y - laneBox.top);
-    var col = b.col;
+    var left = b.x;
     if (gap > 3) {
       var w = Math.max(2, 9 - gap / 25);
       p.band.hidden = false;
       p.band.style.top = (p.y - laneBox.top) + "px";
       p.band.style.height = gap + "px";
       p.band.style.width = w + "px";
-      p.band.style.left = Math.min(col.left + col.width - 6, Math.max(col.left + 6, p.x - laneBox.left)) - w / 2 + "px";
+      p.band.style.left = Math.min(left + BLOCK_W - 6, Math.max(left + 6, p.x - laneBox.left)) - w / 2 + "px";
     } else {
       p.band.hidden = true;
     }
@@ -623,7 +1346,7 @@ import { arrange as arrangeColumns } from "./columns.js";
     var mins = snapPlan(p.want, p.max);
     p.tag.textContent = "until " + clock(b.start + mins * MIN_MS) + " · " + mins + " min";
     p.tag.style.top = (base - p.edge) + "px";
-    p.tag.style.left = (col.left + 4) + "px";
+    p.tag.style.left = (left + 4) + "px";
     requestAnimationFrame(pullFrame);
   }
 
@@ -636,7 +1359,7 @@ import { arrange as arrangeColumns } from "./columns.js";
     if (p.band.hidden || reduceMotion.matches) p.band.remove();
     else p.band.animate([{ transform: "scaleY(1)" }, { transform: "scaleY(0)" }],
       { duration: 120, easing: "ease-in" }).onfinish = function(){ p.band.remove(); };
-    b.el.root.classList.remove("pulling", "fresh");
+    mark(b, "pulling", false);
     b.inset = 0;
     b.plan = cancel ? p.plan0 : snapPlan(p.want, p.max);
     settle(b, p.edge, b.plan * PX, p.v);
@@ -663,7 +1386,7 @@ import { arrange as arrangeColumns } from "./columns.js";
 
   /* ---------- moving the start edge (the bottom one): 1:1, no elasticity; the end stays put ---------- */
   function grabStart(b, e){
-    if (e.button !== 0 || pull || press || move || split) return;
+    if (e.button !== 0 || pull || press || move || drag) return;
     e.preventDefault();
     e.stopPropagation();
     try { e.target.setPointerCapture(e.pointerId); } catch (_) {}
@@ -675,7 +1398,7 @@ import { arrange as arrangeColumns } from "./columns.js";
              lo: Math.max(prev ? extentOf(prev, now) : dayStart, end - MAX_PLAN * MIN_MS),
              hi: end - MIN_PLAN * MIN_MS, tag: tag };
     b.anim = null;
-    b.el.root.classList.add("pulling");
+    mark(b, "pulling", true);
     moveStart(e.clientY);
   }
   function moveStart(y){
@@ -688,50 +1411,80 @@ import { arrange as arrangeColumns } from "./columns.js";
     relayout(Date.now());
     m.tag.textContent = "from " + clock(start) + " · " + b.plan + " min";
     m.tag.style.top = yOf(start) + "px";
-    m.tag.style.left = (b.col.left + 4) + "px";
+    m.tag.style.left = (b.x + 4) + "px";
   }
   function endMove(e){
     if (!move || (e && e.pointerId !== move.pointer)) return;
     var m = move;
     move = null;
     m.tag.remove();
-    m.b.el.root.classList.remove("pulling");
+    mark(m.b, "pulling", false);
     render();   // moving the start can change what's running
     persist();
   }
 
-  /* ---------- dragging the line between two parallel columns ---------- */
-  function grabSplit(left, right, e){
-    if (e.button !== 0 || pull || press || move || split) return;
-    e.preventDefault();
-    e.stopPropagation();
-    split = { pointer: e.pointerId, a: left.track, b: right.track,
-              x0: left.x0, x1: right.x1, sum: left.track.w + right.track.w };
-    lane.classList.add("splitting");   // no width transitions while dragging
+  /* ---------- dragging a block sideways: moving it, and what it means, is the owner's ---------- */
+  // A press that moves mostly sideways while on a block becomes this drag. The block follows
+  // the pointer 1:1 — x is free, so where it lands (and how close to the others) can mean
+  // whatever she wants. Releasing near another block's x lines the queue up exactly; a landing
+  // that would sit on a block it overlaps in time snaps home.
+  function beginDrag(b, pointer, x){
+    try { lane.setPointerCapture(pointer); } catch (_) {}
+    b.anim = null;
+    drag = { b: b, pointer: pointer, x0: b.x, at: b.x,
+             dx: x - b.el.root.getBoundingClientRect().left };
+    mark(b, "dragging", true);
+    hideTip();
+    rebuildTies();   // a block on the move is untied until it lands
+    moveDrag(x);
   }
-  function moveSplit(x){
-    var s = split, span = s.x1 - s.x0;
-    var f = (x - lane.getBoundingClientRect().left - s.x0) / span;
-    var lo = Math.min(0.5, MIN_COL / span);
-    f = Math.max(lo, Math.min(1 - lo, f));
-    s.a.w = s.sum * f;
-    s.b.w = s.sum - s.a.w;
-    relayout(Date.now());
+  function moveDrag(x){
+    var d = drag;
+    d.at = clampX(x - lane.getBoundingClientRect().left - d.dx);
+    d.b.el.root.style.left = d.at + "px";
+    d.b.el.shade.style.left = (d.at + SHADE_X) + "px";
+    placeBadge(d.b);
   }
-  function endSplit(e){
-    if (!split || (e && e.pointerId !== split.pointer)) return;
-    split = null;
-    lane.classList.remove("splitting");
-    persist();
+  // Whether a block at `x` would overlap b's span in both x and time.
+  function freeAt(x, b){
+    var now = Date.now(), ext = extentOf(b, now);
+    return !blocks.some(function(o){
+      return o !== b && Math.abs(o.x - x) < BLOCK_W && o.start < ext && b.start < extentOf(o, now);
+    });
+  }
+  function endDrag(e, cancel){
+    if (!drag || (e && e.pointerId !== drag.pointer)) return;
+    var d = drag, b = d.b;
+    drag = null;
+    mark(b, "dragging", false);   // the left transition animates the snap
+    var to = d.x0;
+    if (!cancel) {
+      var near = null;   // the magnet: a block whose x is within 10 px of the landing
+      blocks.forEach(function(o){
+        if (o !== b && Math.abs(o.x - d.at) < 10 && (!near || Math.abs(o.x - d.at) < Math.abs(near.x - d.at))) near = o;
+      });
+      var landed = (near ? [near.x, d.at] : [d.at]).find(function(x){ return freeAt(x, b); });
+      if (landed == null) say("No room there.");
+      else to = landed;
+    }
+    b.x = to;
+    render();   // a new queue can end the block (one above it) or revive the one it ended
+    if (to !== d.x0) persist();
   }
 
   window.addEventListener("pointermove", function(e){
-    if (split && e.pointerId === split.pointer) { moveSplit(e.clientX); return; }
+    if (drag && e.pointerId === drag.pointer) { moveDrag(e.clientX); return; }
     if (move && e.pointerId === move.pointer) { moveStart(e.clientY); return; }
     if (press && e.pointerId === press.pointer) {
       press.x = e.clientX;
       press.y = e.clientY;
-      if (Math.hypot(e.clientX - press.x0, e.clientY - press.y0) > HOLD_SLOP) cancelPress();
+      var dx = e.clientX - press.x0, dy = e.clientY - press.y0;
+      if (Math.hypot(dx, dy) > HOLD_SLOP) {
+        var over = press.over, pointer = press.pointer;
+        cancelPress();
+        // moving mostly sideways from a press on a block drags the block to a new place
+        if (over && Math.abs(dx) >= Math.abs(dy)) beginDrag(over, pointer, e.clientX);
+      }
     } else if (pull && e.pointerId === pull.pointer) {
       pull.x = e.clientX;
       pull.y = e.clientY;
@@ -739,20 +1492,24 @@ import { arrange as arrangeColumns } from "./columns.js";
   });
   window.addEventListener("pointerup", function(e){
     if (press && e.pointerId === press.pointer) cancelPress();   // let go too soon: nothing
-    endSplit(e);
+    endDrag(e, false);
     endMove(e);
     endPull(e, false);
   });
   window.addEventListener("pointercancel", function(e){
     if (press && e.pointerId === press.pointer) cancelPress();
-    endSplit(e);
+    endDrag(e, true);
     endMove(e);
     endPull(e, true);
   });
   window.addEventListener("keydown", function(e){
     if (e.key !== "Escape") return;
     closeMenu();
+    closeCal();
+    closeAllBubbles();
     cancelPress();
+    cancelRoll();   // no block then
+    if (drag) endDrag(null, true);
     if (pull) endPull(null, true);
   });
   window.addEventListener("resize", function(){ relayout(Date.now()); });
@@ -760,19 +1517,38 @@ import { arrange as arrangeColumns } from "./columns.js";
   /* ---------- clock ---------- */
   function tick(){
     var now = Date.now();
-    if (dayKeyAt(now) !== dayKey) { buildDay(); return; }
+    if (dayKeyAt(now) !== dayKey) {
+      if (following) { buildDay(); return; }
+    } else following = true;   // the future day being shown has come
+    $("st-today").hidden = following;
+    // On another day, now is off the timeline: a past day is all gone, a future one all ahead.
+    nowLine.hidden = now < dayStart || now >= dayEnd;
     nowLine.style.top = yOf(now) + "px";
-    past.style.top = yOf(now) + "px";
+    past.style.top = Math.max(0, Math.min(yOf(dayStart), yOf(now))) + "px";
     nowLine.firstChild.textContent = shortClock(now);
     var ended = false;
     blocks.forEach(function(b){
-      if ((pull && pull.b === b) || (move && move.b === b)) return;
-      // A block that ended because the next one in its track began: record when, so the log
+      if ((pull && pull.b === b) || (move && move.b === b) || (drag && drag.b === b)) return;
+      // A block that ended because the next one in its queue began: record when, so the log
       // keeps the outcome rather than re-deriving it later.
       if (b.end == null && b.start <= now && endOf(b, now) != null) { b.end = endOf(b, now); ended = true; }
       if (stateOf(b, now) !== b.state) remount(b);       // its time came, or the next one began
     });
-    relayout(now);   // running blocks grow, which can bring them alongside others
+    // A switching group needs all its members still running: when one ends (or is removed), the
+    // group is closed — an outcome, logged — and the rest, if still two or more, go on as a new
+    // group from here, like processes sharing a core after one of them exits.
+    switches.forEach(function(g){
+      if (g.to != null) return;
+      var live = g.blocks.filter(function(id){
+        var o = byId(id);
+        return o && stateOf(o, now) === "running";
+      });
+      if (live.length === g.blocks.length) return;
+      g.to = now;
+      if (live.length >= 2) switches.push({ id: nextId++, blocks: live, from: now, to: null });
+      ended = true;
+    });
+    relayout(now);
     if (ended) persist();
   }
   setInterval(tick, 5000);
@@ -782,10 +1558,24 @@ import { arrange as arrangeColumns } from "./columns.js";
   // Show the day with now two thirds of the way down and the rest of the day above it.
   function start(){
     buildDay();
-    scroller.scrollTop = yOf(Date.now()) - scroller.clientHeight * 0.67;
+    scrollToDay();
+  }
+  // Today opens at now; another day at its first block or mark, or else at 8 am, two thirds
+  // of the way down.
+  function scrollToDay(){
+    var at = Date.now();
+    if (!following) {
+      at = null;
+      blocks.forEach(function(b){ if (at == null || b.start < at) at = b.start; });
+      if (marks.wake != null && (at == null || marks.wake < at)) at = marks.wake;
+      if (at == null) at = dayStart + (8 * 60 - (4 * 60 + 30)) * MIN_MS;
+    }
+    scroller.scrollTop = yOf(at) - scroller.clientHeight * 0.67;
   }
   window.stretch.load().then(function(days){
     saved = days || {};
+    labels = ((saved.labels || {}).labels || []).map(function(l){ return { id: l.id, name: String(l.name), archived: !!l.archived }; });
+    labels.forEach(function(l){ nextLabelId = Math.max(nextLabelId, l.id + 1); });
     start();
   }, function(err){
     storageDown = String(err);

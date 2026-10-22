@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="7" height="7" viewBox="0 0 7 7"><!--
+  The halftone tile: a 45-degree dot grid, used as a mask (mask-image in stretch.css) over a
+  solid ink fill, so the dots take the theme's ink colour. Dot size against the 7px tile sets
+  the darkness of the printed shadow.
+--><circle cx="1.75" cy="1.75" r="1.5"/><circle cx="5.25" cy="5.25" r="1.5"/></svg>

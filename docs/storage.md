@@ -51,6 +51,14 @@ Rust treats a day as **opaque JSON** (`serde_json::Value`) and reads only `date`
 belongs to the page (`src/js/stretch.js`). Rust doesn't duplicate it, so a new block field
 needs no Rust change and no migration.
 
+One record is not a calendar day: the page keeps its global label list (task types blocks point
+at by id) in a day-shaped record keyed `date: "labels"` —
+`{ "date": "labels", "labels": [{ "id": 1, "name": "Deep work", "archived": false }], "updatedAt": … }`.
+To the store it's one more opaque image, appended, replayed and checkpointed exactly like a day;
+`"labels"` can never collide with a `YYYY-MM-DD` key. Labels are never removed from the record:
+deleting one sets `archived`, so every block that points at it (on any day) still resolves its
+name. Records written before archiving have no `archived` field, read as `false`.
+
 ## Record format
 
 ```

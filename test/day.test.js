@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dayKeyAt, dayBounds } from "../src/js/day.js";
+import { dayKeyAt, dayBounds, monthCells } from "../src/js/day.js";
 
 const at = (h, m, date, month = 9) => new Date(2026, month - 1, date, h, m).getTime();
 
@@ -18,4 +18,15 @@ test("dayBounds: 4:30 am to 4:30 am, across a month end", () => {
   assert.equal(dayKeyAt(b.start), "2026-09-30");
   assert.equal(dayKeyAt(b.end - 1), "2026-09-30");
   assert.equal(dayKeyAt(b.end), "2026-10-01");
+});
+
+test("monthCells: six weeks from the Sunday on or before the 1st", () => {
+  const oct = monthCells(2026, 9);   // October 2026 begins on a Thursday
+  assert.equal(oct.length, 42);
+  assert.deepEqual(oct[0], { key: "2026-09-27", inMonth: false });
+  assert.deepEqual(oct[4], { key: "2026-10-01", inMonth: true });
+  assert.deepEqual(oct[34], { key: "2026-10-31", inMonth: true });
+  assert.deepEqual(oct[35], { key: "2026-11-01", inMonth: false });
+  const feb = monthCells(2026, 1);   // February 2026 begins on a Sunday
+  assert.deepEqual(feb[0], { key: "2026-02-01", inMonth: true });
 });

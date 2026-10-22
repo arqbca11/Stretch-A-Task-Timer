@@ -1,8 +1,14 @@
 # Stretch — desktop
 
-A macOS menu bar app: a day timeline where you press and hold to place a task block, pull it up
-like a rubber band to set how long it runs, and run blocks in parallel columns. Time runs
-upwards. Bundle identifier `com.ruoqi.stretch`; the page's bridge is `window.stretch`.
+A macOS menu bar app: a day timeline where you press and hold to place a task block — a die
+(the Roll app's ray tracer) bounces at the press point and rolls the block's length, 30–100 min
+— then pull its top edge like a rubber band to shrink or stretch it, and run blocks in parallel
+as thin columns placed freely left to right (blocks that overlap in x are one queue, like
+processes on a core; 2–3 running blocks can be marked as "switching" — time-sliced on one core,
+not parallel). Blocks aren't named by typing: they're labeled with task types from a global,
+stored label list, and a labeled block wears a speech-bubble badge that opens to the label and a
+note. Time runs upwards. Bundle identifier `com.ruoqi.stretch`; the page's bridge is
+`window.stretch`.
 
 Read before changing things:
 - `docs/interaction.md` — the interaction design: decisions, history of each round of feedback,
@@ -33,15 +39,23 @@ Read before changing things:
 
 ```
 src/                     frontend, served as-is
-  index.html             the panel: header + timeline (axis, lane, now dot)
-  js/stretch.js          the whole UI: timeline, press-and-hold, elastic pull, tracks, colours,
-                         hover label, right-click menu, persistence
-  js/day.js              pure: dayKeyAt, dayBounds (4:30 am day boundary); shared with tests
-  js/columns.js          pure: groups blocks and assigns columns, with widening; shared with tests
+  index.html             the panel: header (date, Today pill, calendar icon) + timeline (axis,
+                         lane, now dot)
+  js/stretch.js          the whole UI: timeline, press-and-hold, the roll, elastic pull, free x
+                         placement, sideways drag, colours, hover label, right-click menu,
+                         labels and speech bubbles, switching groups, wake/sleep marks, the
+                         calendar (other days), persistence
+  js/dice.js             the ray-traced die + its physics, ported verbatim from legacy/roll
+                         (see "Legacy"); rollDie/cancelRoll/dieBusy
+  js/day.js              pure: dayKeyAt, dayBounds (4:30 am day boundary), monthCells (the
+                         calendar grid); shared with tests
+  js/switching.js        pure: focused time for switching groups; shared with tests
   js/bridge.js           window.stretch = { load, putDay, panelVisible } over invoke; ordered
                          write queue; forwards "panel-visibility" as the "stretch:visibility" event
   css/stretch.css        all styles; tokens on :root with dark mode
   css/fonts.css, fonts/  Karla 400/500/700
+  img/halftone.svg       the comic halftone tile, masked over ink for the blocks' and
+                         bubbles' shadows
 src-tauri/
   src/lib.rs             builder, plugins, setup (opens the store), window events
   src/store.rs           log + snapshot storage, recovery, checkpoint (unit-tested)
@@ -51,7 +65,7 @@ src-tauri/
   icons/                 trayTemplate.png/@2x (monochrome template) + app icons
   tauri.conf.json
 scripts/draw-icons.swift draws the tray and app icons (CoreGraphics); regenerate commands inside
-test/                    node --test suites for src/js/day.js and src/js/columns.js
+test/                    node --test suites for src/js/day.js and src/js/switching.js
 docs/                    interaction.md, storage.md
 legacy/                  gitignored, local only: the archived Roll app (see Legacy)
 ```
@@ -79,7 +93,9 @@ Look and interaction are documented in `docs/interaction.md`; keep it current wh
   and its end its top edge; the top edge is elastic, the bottom edge rigid.
 - State is derived from time and blocks (`ahead` / `running` / `done`); only Done sets `end`
   directly, and `tick` freezes an end once the next block in the track has begun, then persists.
-- The logical day is 4:30 am to 4:30 am (`day.js`); `tick` rebuilds the view when it rolls over.
+- The logical day is 4:30 am to 4:30 am (`day.js`); `tick` rebuilds the view when it rolls over,
+  but only while the view is on today (`following`). The calendar can show any other day; writes
+  go to the day on show (`dayKey`).
 
 ## Storage
 
@@ -162,10 +178,11 @@ The app is unsigned for personal use. First launch: right-click the app → Open
   opening in a data directory that doesn't exist yet.
   Use a temp dir per test.
 - `dayKeyAt`: 4:29 am belongs to the previous day, 4:30 and 4:31 am to the same day;
-  `dayBounds` spans 4:30 am to 4:30 am across a month end.
-- `columns.js`: two blocks on either side of a free column can't both widen into it; a block
-  alone takes the full width; a randomized stress test (thousands of days) where no two blocks
-  that overlap in time overlap on screen.
+  `dayBounds` spans 4:30 am to 4:30 am across a month end; `monthCells` gives six weeks from the
+  Sunday on or before the 1st.
+- `switching.js`: focused time is wall time with no groups and loses exactly the shared
+  span's (1 − 1/n) per group, clipped to the block and to `upto`; groups the block isn't in
+  don't count.
 
 ## Working with Ruoqi
 
