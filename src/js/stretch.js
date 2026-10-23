@@ -10,7 +10,8 @@
 // block wears a small speech bubble; clicking it opens the bubble with the label and a small
 // note to scribble in.
 //
-// Multitasking: every block is thin (about a tenth of the panel) and sits where it was put —
+// Multitasking: a block is thin (about a tenth of the panel), or a whole multiple of that wide —
+// wider for the task taking the most attention — and sits where it was put —
 // the x axis is free, and the distances between blocks are the owner's to mean something with
 // (how related two tasks are). Blocks that overlap in x are one queue, like processes pinned to
 // one core: a block runs until the next one over it begins. Blocks apart in x run in parallel.
@@ -54,7 +55,9 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   var FOLLOW_K = 110, FOLLOW_C = 11;   // spring while pulling: soft, so it trails and wobbles
   var SPRING_K = 380, SPRING_C = 14;   // spring after release: settles onto the 5-minute step
   var SQUEEZE = 18;                 // px: how much the block narrows on each side at full tension
-  var BLOCK_W = 34;                 // px: every block is this wide, about a tenth of the panel
+  var BLOCK_W = 34;                 // px: the narrowest block, about a tenth of the panel; the unit of width
+  var SPAN_MAX = 4;                 // the widest a block can be, in BLOCK_Ws
+  var KNOCK = [17, 12, 8, 4, 0];    // px: how far clear a pushed block lands, roomiest that fits first
   var PAD_L = 12, PAD_R = 8;        // px: lane padding
   var INK = 2;                      // px: a block's outline, matching the CSS border
   var BADGE_INK = 2;                // px: the badge's outline, matching .st-bub-icon's border
@@ -76,8 +79,9 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   ];
 
   var MIN_MS = 60000;
-  // Blocks: { id, task, x, start, plan (min), created, end, color, label, note }, times in ms;
-  // `end` is set only by Done; `x` is the block's left edge in the lane, px; `color` indexes
+  // Blocks: { id, task, x, span, start, plan (min), created, end, color, label, note }, times in
+  // ms; `end` is set only by Done; `x` is the block's left edge in the lane, px, and `span` its
+  // width in BLOCK_Ws (1, 2, 3…; how much attention it takes); `color` indexes
   // PALETTE; `label` is a label id (or null) and `note` a small free note, both shown in the
   // block's speech bubble. `task` is a typed name from before labels; old blocks still show it.
   // Switching groups: { id, blocks: [block ids], from, to }, `to` null while on (switching.js).
@@ -117,9 +121,15 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   function minsBetween(a, b){ return Math.floor((b - a) / MIN_MS); }
 
   /* ---------- queues: blocks that overlap in x share a core and run in sequence ---------- */
-  function maxX(){ return lane.clientWidth - PAD_R - BLOCK_W; }
-  function clampX(x){ return Math.max(PAD_L, Math.min(maxX(), x)); }
-  function xOverlap(a, b){ return Math.abs(a.x - b.x) < BLOCK_W; }
+  // A block is `span` BLOCK_Ws wide. Its centre line is what alignment, ties and the magnet go by,
+  // so blocks of different widths line up on their middles.
+  function widthOf(b){ return (b.span || 1) * BLOCK_W; }
+  function centreOf(b){ return b.x + widthOf(b) / 2; }
+  // x stays on whole pixels (BLOCK_W is even), so centres compare exactly.
+  function clampX(x, w){ return Math.round(Math.max(PAD_L, Math.min(lane.clientWidth - PAD_R - (w || BLOCK_W), x))); }
+  // Whether spans [x, x + w) overlap: then they share a core.
+  function spansMeet(x1, w1, x2, w2){ return x1 < x2 + w2 && x2 < x1 + w1; }
+  function xOverlap(a, b){ return spansMeet(a.x, widthOf(a), b.x, widthOf(b)); }
   function byId(id){ return blocks.find(function(b){ return b.id === id; }); }
   function nextAfter(b){
     var n = null;
@@ -156,10 +166,12 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   }
   // The longest plan that fits before the next block in its queue (or the end of the day). A
   // block that has begun can be stretched to now and up to MAX_PLAN beyond it, so coming back
-  // late never leaves the block out of reach.
+  // late never leaves the block out of reach. A finished block can be stretched up to now, not
+  // past it: it's a record of something done, however long it took.
   function roomAfter(b){
     var now = Date.now();
-    var cap = b.start <= now ? minsBetween(b.start, now) + MAX_PLAN : MAX_PLAN;
+    var cap = b.end != null ? minsBetween(b.start, now)
+      : b.start <= now ? minsBetween(b.start, now) + MAX_PLAN : MAX_PLAN;
     var n = nextAfter(b);
     return Math.min(cap, minsBetween(b.start, n ? n.start : dayEnd));
   }
@@ -179,10 +191,11 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   }
 
   /* ---------- aligned blocks: one label, one x, tied by a dashed line ---------- */
-  // Blocks that share a label and sit at exactly the same x are aligned: a dashed line runs up
-  // the gap between each one and the next. Nothing is stored — it's drawn from the labels and
-  // the x positions, so dragging one away unties it. "Align" in the right-click menu lines up
-  // every block of a label at once.
+  // Blocks that share a label and sit on exactly the same centre line are aligned: a dashed line
+  // runs up the gap between each one and the next. Nothing is stored — it's drawn from the labels
+  // and the positions, so dragging one away unties it. "Align" in the right-click menu lines up
+  // every block of a label at once. Widths can differ: changing one keeps its centre, so the
+  // line holds.
   var ties = [];
   function kinOf(b){
     return b.label == null ? [] : blocks.filter(function(o){ return o.label === b.label; });
@@ -191,10 +204,11 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     var keep = {};
     ties.forEach(function(t){ keep[t.key] = t; });
     ties = [];
-    var rows = {};   // label:x → blocks, so each column of a label is tied in start order
+    var rows = {};   // label:centre → blocks, so each column of a label is tied in start order
     blocks.forEach(function(b){
       if (b.label == null || !b.el || (drag && drag.b === b)) return;
-      (rows[b.label + ":" + b.x] = rows[b.label + ":" + b.x] || []).push(b);
+      var r = b.label + ":" + centreOf(b);
+      (rows[r] = rows[r] || []).push(b);
     });
     Object.keys(rows).forEach(function(r){
       var row = rows[r].sort(function(a, c){ return a.start - c.start; });
@@ -221,7 +235,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     var lo = t.lo.el.root, hi = t.hi.el.root;
     var top = hi.offsetTop + hi.offsetHeight, bottom = lo.offsetTop;
     t.el.hidden = bottom - top < 2;
-    t.el.style.left = (t.lo.x + BLOCK_W / 2 - 1) + "px";
+    t.el.style.left = (centreOf(t.lo) - 1) + "px";
     t.el.style.top = top + "px";
     t.el.style.height = Math.max(0, bottom - top) + "px";
   }
@@ -229,9 +243,10 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     ties.forEach(function(t){ if (t.lo === b || t.hi === b) placeTie(t); });
   }
 
-  // Line up every block of b's label at b's x. If that x would sit them on another block, the
-  // nearest x where all of them fit is used instead; blocks of one label that overlap in time
-  // can't share a queue, so then nothing moves.
+  // Line up every block of b's label on b's centre line, each keeping its own width, pushing
+  // aside other blocks in the way (pushAside). If even that finds no room, the nearest centre
+  // where all of them fit as things stand is used instead. Blocks of one label that overlap in
+  // time can't share a queue, so then nothing moves.
   function align(b){
     var kin = kinOf(b), now = Date.now();
     var seq = kin.slice().sort(function(a, c){ return a.start - c.start; });
@@ -241,21 +256,26 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
         return;
       }
     }
-    function fits(x){
+    function fits(c){
       return kin.every(function(k){
-        return !blocks.some(function(o){
-          return kin.indexOf(o) < 0 && Math.abs(o.x - x) < BLOCK_W &&
+        var x = c - widthOf(k) / 2;
+        return clampX(x, widthOf(k)) === x && !blocks.some(function(o){
+          return kin.indexOf(o) < 0 && spansMeet(o.x, widthOf(o), x, widthOf(k)) &&
             o.start < extentOf(k, now) && k.start < extentOf(o, now);
         });
       });
     }
-    var x = null;
-    for (var d = 0; x == null && d < lane.clientWidth; d += 4) {
-      if (clampX(b.x + d) === b.x + d && fits(b.x + d)) x = b.x + d;
-      else if (clampX(b.x - d) === b.x - d && fits(b.x - d)) x = b.x - d;
+    var c0 = centreOf(b), c = null;
+    var fixed = new Map();
+    kin.forEach(function(k){ fixed.set(k, { x: c0 - widthOf(k) / 2, span: k.span || 1 }); });
+    var push = shove(fixed, c0);
+    if (push) { applyPush(push); return; }
+    for (var d = 0; c == null && d < lane.clientWidth; d += 4) {
+      if (fits(c0 + d)) c = c0 + d;
+      else if (fits(c0 - d)) c = c0 - d;
     }
-    if (x == null) { say("No room to align these."); return; }
-    kin.forEach(function(k){ k.x = x; });
+    if (c == null) { say("No room to align these."); return; }
+    kin.forEach(function(k){ k.x = c - widthOf(k) / 2; });
     render();   // they're one queue now; the slide transition carries them there
     persist();
   }
@@ -338,7 +358,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
       if (g.to != null) return;
       var members = g.blocks.map(byId).filter(Boolean).sort(function(a, c){ return a.x - c.x; });
       for (var i = 0; i < members.length - 1; i++) {
-        var lo = members[i].x + BLOCK_W + 1, hi = members[i + 1].x - 1 - BALL;
+        var lo = members[i].x + widthOf(members[i]) + 1, hi = members[i + 1].x - 1 - BALL;
         if (hi <= lo) continue;
         var key = g.id + ":" + i;
         var k = keep[key];
@@ -470,7 +490,8 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
         var slot = b.slot != null ? b.slot : Math.max(0, order.indexOf(b.track));
         x = PAD_L + slot * (BLOCK_W + 8);
       }
-      return { id: b.id, task: b.task || "", x: clampX(x), start: b.start,
+      var span = Math.max(1, Math.min(SPAN_MAX, b.span || 1));
+      return { id: b.id, task: b.task || "", x: clampX(x, span * BLOCK_W), span: span, start: b.start,
                plan: b.plan, created: b.created, end: b.end == null ? null : b.end,
                color: (b.color == null ? b.id - 1 : b.color) % PALETTE.length,
                label: b.label == null ? null : b.label, note: b.note || "",
@@ -524,7 +545,8 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     root.addEventListener("pointerleave", hideTip);
     root.addEventListener("contextmenu", function(e){ e.preventDefault(); openMenu(b, e); });
     var handle = null;
-    if (b.state !== "done") {
+    // Finished blocks keep their edges too, so a task logged after the fact can be fixed up.
+    {
       handle = document.createElement("div");
       handle.className = "st-handle";
       handle.title = "Pull up to change when it ends";
@@ -598,7 +620,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     // reads the start of a slide, so the badge would stay behind a block sliding away.
     var rootTop = r.root.offsetTop;
     var centre = parseFloat(r.root.style.left) + parseFloat(r.root.style.width) / 2;
-    var flip = b.x > maxX() - 70;
+    var flip = b.x + widthOf(b) > lane.clientWidth - PAD_R - 70;
     var inner = r.badge.clientWidth;   // the padding box, inside the 2-px border
     var tip = flip ? inner - TAIL_TIP : TAIL_TIP;
     r.badge.classList.toggle("flip", flip);
@@ -648,13 +670,14 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     badge.addEventListener("pointercancel", up);
   }
 
-  // Position a block. `planPx` overrides the plan's length while it's being pulled or settling.
+  // Position a block. `planPx` overrides its length while it's being pulled or settling.
   function layout(b, planPx, now){
     var r = b.el;
-    if (planPx == null) planPx = b.plan * PX;
+    var live = planPx != null;
+    if (!live) planPx = b.plan * PX;
     var height, solid;
     if (b.state === "done") {
-      height = solid = Math.max(3, (endOf(b, now) - b.start) / MIN_MS * PX);
+      height = solid = live ? planPx : Math.max(3, (endOf(b, now) - b.start) / MIN_MS * PX);
     } else if (b.state === "running") {
       height = planPx;
       solid = Math.min(height, Math.max(0, (now - b.start) / MIN_MS * PX));   // the fill stops at the planned end
@@ -662,16 +685,16 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
       height = planPx;
       solid = 0;
     }
-    var inset = Math.min(b.inset || 0, BLOCK_W * 0.15);   // squeezed while it's being pulled
+    var inset = Math.min(b.inset || 0, BLOCK_W * 0.15);   // squeezed while it's being pulled (the same at any width)
     var top = yOf(b.start) - height;                      // it starts at the bottom and grows up
     // Back-to-back blocks in a queue share one outline: when the block above starts exactly
     // where this one ends, this box grows one border up so the two borders print as one line
     // (same ink, so the overlap is invisible). Skipped mid-pull, where height is transient.
-    if (planPx === b.plan * PX || b.state === "done") {
+    if (!live) {
       var n = nextAfter(b);
       if (n && Math.abs(top - yOf(n.start)) < 0.75) { top -= INK; height += INK; }
     }
-    var left = b.x + inset, width = Math.max(8, BLOCK_W - 2 * inset);
+    var left = b.x + inset, width = Math.max(8, widthOf(b) - 2 * inset);
     r.root.style.top = top + "px";
     r.root.style.height = height + "px";
     r.root.style.left = left + "px";
@@ -764,10 +787,24 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
       }
     }
     var kin = kinOf(b);
-    if (kin.length > 1 && kin.some(function(o){ return o.x !== b.x; })) {
+    if (kin.length > 1 && kin.some(function(o){ return centreOf(o) !== centreOf(b); })) {
       el.append(button("Align", "", "Line up every " + labelOf(b) + " block here",
         function(){ closeMenu(); align(b); }));
     }
+    // Width: how much attention it takes, in whole multiples of the narrowest block.
+    var wrow = document.createElement("div");
+    wrow.className = "st-menu-width";
+    var wl = document.createElement("span");
+    wl.textContent = "Width";
+    wrow.append(wl);
+    for (var n = 1; n <= SPAN_MAX; n++) (function(n){
+      var cur = (b.span || 1) === n;
+      var wb = button(n + "×", cur ? "on" : "", cur ? "This width" : n + " times as wide",
+        function(){ closeMenu(); if (!cur) setSpan(b, n); });
+      wb.setAttribute("aria-pressed", String(cur));
+      wrow.append(wb);
+    })(n);
+    el.append(wrow);
     el.append(button("Remove", "", "Remove this block", function(){ closeMenu(); remove(b); }));
     // Labels: the block's type. Every label ever added is here to pick from; the current one is
     // ticked, and picking it again takes it off. The input at the bottom adds a new one.
@@ -1082,7 +1119,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     var doc = {
       date: dayKey,
       blocks: blocks.map(function(b){
-        return { id: b.id, task: b.task, x: b.x, start: b.start, plan: b.plan,
+        return { id: b.id, task: b.task, x: b.x, span: b.span, start: b.start, plan: b.plan,
                  created: b.created, end: b.end, color: b.color, label: b.label, note: b.note,
                  bubbleY: b.bubbleY };
       }),
@@ -1178,10 +1215,10 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     press = null;
   }
 
-  // The block (other than `b`) that a block at `x` starting at `start` would sit on.
+  // The block (other than `b`) that a 1× block at `x` starting at `start` would sit on.
   function clashAt(x, start, now, b){
     return blocks.find(function(o){
-      return o !== b && Math.abs(o.x - x) < BLOCK_W &&
+      return o !== b && spansMeet(o.x, widthOf(o), x, BLOCK_W) &&
         o.start < start + MIN_PLAN * MIN_MS && start < extentOf(o, now);
     });
   }
@@ -1214,7 +1251,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     }
     if (clash) { say("No room for a block here."); return; }
 
-    var b = { id: nextId++, task: "", x: x, start: start, plan: MIN_PLAN, created: now, end: null,
+    var b = { id: nextId++, task: "", x: x, span: 1, start: start, plan: MIN_PLAN, created: now, end: null,
               color: nextColor(), label: null, note: "", bubbleY: null };
     var room = roomAfter(b);
     if (room < MIN_PLAN) { say("No room for a block here."); return; }
@@ -1227,6 +1264,8 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
       if (dayKey !== key) return;                                   // the view moved to another day mid-roll
       if (clashAt(b.x, b.start, then, null)) { say("No room there any more."); return; }
       b.plan = Math.max(MIN_PLAN, Math.min(n, roomAfter(b)));
+      // Placed wholly behind now, it's a task logged after the fact: finished already.
+      if (b.start + b.plan * MIN_MS <= then) b.end = b.start + b.plan * MIN_MS;
       blocks.push(b);
       // A block placed behind now may end one that was still going, so bring them all up to date.
       render();
@@ -1243,6 +1282,104 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
       setTimeout(function(){ tag.remove(); }, 2000);
       persist();
     });
+  }
+
+  // Make room for blocks being put somewhere new. `fixed` maps each such block to where it's
+  // going, { x, span }; it won't move again. Any block that would then sit on another
+  // (overlapping in time) gives way outward, away from the centre line `c`, and lands `gap` px
+  // clear — knocked a little further than it had to go — taking the blocks aligned with it (same
+  // label, same centre) along so their ties hold, and pushing whatever it meets in turn. Returns
+  // { pos: every moved block's new x, hits: each pushed block's { depth, dir } (1 = hit by a
+  // fixed block, 2 = by one of those…) }, or null if something would have to leave the lane.
+  // Nothing is changed here.
+  function pushAside(fixed, c, gap){
+    var now = Date.now(), pos = new Map(), hits = new Map();
+    fixed.forEach(function(f, k){ pos.set(k, f.x); });
+    function px(k){ return pos.has(k) ? pos.get(k) : k.x; }
+    function wd(k){ return (fixed.has(k) ? fixed.get(k).span : k.span || 1) * BLOCK_W; }
+    function together(a, k){ return a.start < extentOf(k, now) && k.start < extentOf(a, now); }
+    function fits(k, x){ return clampX(x, wd(k)) === x; }
+    // touching counts (within 2 px): a block that comes up against another knocks it
+    function near(a, k){ return px(a) < px(k) + wd(k) + 2 && px(k) < px(a) + wd(a) + 2; }
+    // only what this change moves or widens can knock anything; blocks already side by side stay
+    function changed(k){ return pos.has(k) && (pos.get(k) !== k.x || wd(k) !== widthOf(k)); }
+    var ok = true;
+    pos.forEach(function(x, k){ if (!fits(k, x)) ok = false; });
+    for (var guard = 0; ok; guard++) {
+      if (guard > 500) return null;
+      // a moved block on or against another: the one further from c gives way (a fixed one never
+      // does), outward, to land `gap` clear. A touch that's already that far apart isn't a hit.
+      var hit = null;
+      blocks.forEach(function(p){
+        if (hit === false || !changed(p)) return;
+        blocks.forEach(function(o){
+          if (hit || hit === false || p === o || fixed.has(o) || !together(p, o) || !near(p, o)) return;
+          var dp = Math.abs(centreOf(p) - c), dq = Math.abs(centreOf(o) - c);
+          var h = fixed.has(p) || dq > dp || (dq === dp && p.id < o.id) ? { by: p, o: o } : { by: o, o: p };
+          if (fixed.has(h.o)) return;
+          h.dir = centreOf(h.o) < c ? -1 : 1;
+          var to = h.dir < 0 ? Math.min(px(h.o), px(h.by) - wd(h.o) - gap)
+                             : Math.max(px(h.o), px(h.by) + wd(h.by) + gap);
+          h.d = to - px(h.o);
+          if (h.d) hit = h;
+          else if (spansMeet(px(p), wd(p), px(o), wd(o))) hit = false;   // on it, and outward won't clear it
+        });
+      });
+      if (hit === false) return null;
+      if (!hit) return { pos: pos, hits: hits };
+      var o = hit.o, by = hit.by, dir = hit.dir, d = hit.d;
+      var depth = (hits.has(by) ? hits.get(by).depth : 0) + 1;
+      (o.label == null ? [o] : blocks.filter(function(k){
+        return k.label === o.label && centreOf(k) === centreOf(o);
+      })).forEach(function(k){
+        if (fixed.has(k) || !fits(k, px(k) + d)) ok = false;
+        pos.set(k, px(k) + d);
+        if (!hits.has(k) || hits.get(k).depth > depth) hits.set(k, { depth: depth, dir: dir });
+      });
+    }
+    return null;
+  }
+
+  // Change how wide a block is, keeping its centre line — so a block aligned with others stays
+  // aligned — and pushing aside what's in the way. A wider block can join a queue it didn't touch
+  // before, and so end (or be ended by) a block there, like dragging it would.
+  function setSpan(b, n){
+    var c = centreOf(b);
+    var push = shove(new Map([[b, { x: c - n * BLOCK_W / 2, span: n }]]), c);
+    if (!push) { say("No room to make it " + n + "× wide here."); return; }
+    b.span = n;
+    applyPush(push);
+  }
+
+  // pushAside with the roomiest knock that fits: half a narrow block clear, less when it's full.
+  function shove(fixed, c){
+    for (var i = 0; i < KNOCK.length; i++) {
+      var push = pushAside(fixed, c, KNOCK[i]);
+      if (push) return push;
+    }
+    return null;
+  }
+  // Move everything to where pushAside put it. A pushed block is knocked: it squashes for a beat
+  // on the side it was hit from, then slides off — the slide transition's overshoot is its
+  // bounce. Blocks further down a chain of pushes are hit a little later.
+  function applyPush(push){
+    push.pos.forEach(function(x, k){ k.x = x; });
+    if (!reduceMotion.matches) push.hits.forEach(function(h, k){
+      if (!k.el) return;
+      var delay = 50 + (h.depth - 1) * 90;
+      var els = [k.el.root, k.el.shade, k.el.badge].filter(Boolean);
+      els.forEach(function(el){ el.style.transitionDelay = delay + "ms"; });
+      setTimeout(function(){
+        els.forEach(function(el){ el.style.transitionDelay = ""; });
+      }, delay + 450);
+      if (k.el.root.animate) k.el.root.animate([
+        { transform: "none", transformOrigin: h.dir < 0 ? "0 50%" : "100% 50%" },
+        { transform: "scaleX(.78)", transformOrigin: h.dir < 0 ? "0 50%" : "100% 50%", offset: .35 },
+        { transform: "none", transformOrigin: h.dir < 0 ? "0 50%" : "100% 50%" }
+      ], { duration: 220, delay: Math.max(0, delay - 30), easing: "cubic-bezier(.2,.8,.4,1)" });
+    });
+    render();   // the slide transition carries the pushed blocks over
+    persist();
   }
 
   // Done ends the block where it stands: now, or its planned end if that has already passed
@@ -1288,8 +1425,11 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     band.hidden = true;
     band.style.setProperty("--st-c", PALETTE[b.color]);
     lane.append(band, tag);
+    // A finished block is as long as it ran, which can be short of its plan (Done, or the next
+    // block in its queue began); pulling it starts from there and moves its end.
+    if (b.end != null) b.plan = minsBetween(b.start, b.end);
     var px = b.plan * PX;
-    pull = { b: b, pointer: pointer, x: x, y: y, plan0: b.plan, base: px,
+    pull = { b: b, pointer: pointer, x: x, y: y, plan0: b.plan, end0: b.end, base: px,
              // where the pointer took hold, as a height above the block's start: the pull is
              // measured from here, so the block grows from the first pixel of movement
              anchor: yOf(b.start) - (y - lane.getBoundingClientRect().top),
@@ -1338,7 +1478,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
       p.band.style.top = (p.y - laneBox.top) + "px";
       p.band.style.height = gap + "px";
       p.band.style.width = w + "px";
-      p.band.style.left = Math.min(left + BLOCK_W - 6, Math.max(left + 6, p.x - laneBox.left)) - w / 2 + "px";
+      p.band.style.left = Math.min(left + widthOf(b) - 6, Math.max(left + 6, p.x - laneBox.left)) - w / 2 + "px";
     } else {
       p.band.hidden = true;
     }
@@ -1362,6 +1502,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     mark(b, "pulling", false);
     b.inset = 0;
     b.plan = cancel ? p.plan0 : snapPlan(p.want, p.max);
+    if (p.end0 != null) b.end = cancel ? p.end0 : b.start + b.plan * MIN_MS;
     settle(b, p.edge, b.plan * PX, p.v);
     relayout(Date.now());   // a longer block can run alongside more of the others
     persist();              // a new block is saved once it's placed
@@ -1390,12 +1531,13 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     e.preventDefault();
     e.stopPropagation();
     try { e.target.setPointerCapture(e.pointerId); } catch (_) {}
-    var now = Date.now(), end = b.start + b.plan * MIN_MS, prev = prevBefore(b);
+    var now = Date.now(), end = b.end != null ? b.end : b.start + b.plan * MIN_MS, prev = prevBefore(b);
+    var lo = prev ? extentOf(prev, now) : dayStart;
     var tag = document.createElement("div");
     tag.className = "st-tag above";
     lane.append(tag);
     move = { b: b, pointer: e.pointerId, y0: e.clientY, s0: scroller.scrollTop, start0: b.start, end: end,
-             lo: Math.max(prev ? extentOf(prev, now) : dayStart, end - MAX_PLAN * MIN_MS),
+             lo: b.end != null ? lo : Math.max(lo, end - MAX_PLAN * MIN_MS),   // a finished one can be any length
              hi: end - MIN_PLAN * MIN_MS, tag: tag };
     b.anim = null;
     mark(b, "pulling", true);
@@ -1440,16 +1582,16 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   }
   function moveDrag(x){
     var d = drag;
-    d.at = clampX(x - lane.getBoundingClientRect().left - d.dx);
+    d.at = clampX(x - lane.getBoundingClientRect().left - d.dx, widthOf(d.b));
     d.b.el.root.style.left = d.at + "px";
     d.b.el.shade.style.left = (d.at + SHADE_X) + "px";
     placeBadge(d.b);
   }
-  // Whether a block at `x` would overlap b's span in both x and time.
+  // Whether b, put at `x`, would be clear of every block it overlaps in time.
   function freeAt(x, b){
     var now = Date.now(), ext = extentOf(b, now);
     return !blocks.some(function(o){
-      return o !== b && Math.abs(o.x - x) < BLOCK_W && o.start < ext && b.start < extentOf(o, now);
+      return o !== b && spansMeet(o.x, widthOf(o), x, widthOf(b)) && o.start < ext && b.start < extentOf(o, now);
     });
   }
   function endDrag(e, cancel){
@@ -1459,11 +1601,20 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     mark(b, "dragging", false);   // the left transition animates the snap
     var to = d.x0;
     if (!cancel) {
-      var near = null;   // the magnet: a block whose x is within 10 px of the landing
+      // the magnet: a block whose centre line is within 10 px of the landing's
+      var c = d.at + widthOf(b) / 2, near = null;
       blocks.forEach(function(o){
-        if (o !== b && Math.abs(o.x - d.at) < 10 && (!near || Math.abs(o.x - d.at) < Math.abs(near.x - d.at))) near = o;
+        if (o !== b && Math.abs(centreOf(o) - c) < 10 &&
+            (!near || Math.abs(centreOf(o) - c) < Math.abs(centreOf(near) - c))) near = o;
       });
-      var landed = (near ? [near.x, d.at] : [d.at]).find(function(x){ return freeAt(x, b); });
+      var onNear = near && centreOf(near) - widthOf(b) / 2;
+      if (near && clampX(onNear, widthOf(b)) !== onNear) near = null;
+      var landed = (near ? [onNear, d.at] : [d.at]).find(function(x){ return freeAt(x, b); });
+      // Where it lands it knocks what it's up against (or dropped on) a little way off, as
+      // widening does; only if that can't fit in the lane does it snap home.
+      var at = landed == null ? d.at : landed;
+      var push = at !== d.x0 && shove(new Map([[b, { x: at, span: b.span || 1 }]]), at + widthOf(b) / 2);
+      if (push) { applyPush(push); return; }
       if (landed == null) say("No room there.");
       else to = landed;
     }

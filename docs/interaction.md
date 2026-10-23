@@ -268,6 +268,54 @@ Each round was built, installed and tried in the menu bar panel.
     a "Today" pill beside the date leads back. The marks are `wake` and `sleep` on the day
     record — at most one each a day — drawn as small bubbles just right of the axis, tail
     pointing at the time, showing the time; drag 1:1 to the minute, right-click → *Remove*.
+30. **Wider blocks for the task taking the most attention.** *Feedback (2026-10-22, same day):*
+    block width should be changeable, only in whole multiples of the narrowest (1×, 2×, 3×…),
+    with aligned blocks staying aligned on their middle line when any width changes. A block
+    has a `span` (1–`SPAN_MAX` = 4), set from a *Width 1× 2× 3× 4×* row in the right-click menu.
+    A width change keeps the block's centre, and everything that lines blocks up now goes by
+    centre line instead of left edge: ties (same label + same centre), *Align* (every block of
+    the label onto one centre, each keeping its width), and the drag magnet (snaps when the
+    centres are within 10 px). `x` is kept on whole pixels so centres compare exactly. The queue
+    test became an interval overlap ([x, x + width)), so a wide block shares a core with every
+    block it spans. A width that would cross the lane's edge or sit on a block it overlaps in
+    time is refused ("No room to make it n× wide here"), rather than moved off its centre.
+31. **Logging finished tasks; widening past blocks.** *Feedback (2026-10-23):* she should be able
+    to add a block for a task she didn't log while it was going and that's already over — a
+    block placed wholly in the past couldn't be resized — and past blocks couldn't be made
+    wider. The log showed why. A block's end is frozen as soon as a later block in its queue
+    begins, so a back-filled block in a queue with anything after it was `done` the moment it
+    landed, and `done` blocks had no edges. And widening was refused whenever the centred
+    width ran into a neighbour it had run alongside (107 and 108 on Oct 22, 7 px apart) — not
+    a past-block rule at all, but it hit past blocks, which sit densely. Now: finished blocks
+    keep both edges. Pulling the top moves its `end` (and `plan` with it), up to now and the
+    next block in the queue; the bottom moves the start with no MAX_PLAN floor. A block placed
+    wholly behind now is finished on landing (`end = start + plan`). Widening pushes blocking
+    neighbours outward (she picked this over growing off-centre or a clearer refusal): each
+    block in the way slides away from the widened block's centre line just far enough, taking
+    its aligned blocks (same label, same centre) along, and pushing whatever it meets in turn;
+    only if something would leave the lane is it refused.
+32. **Align pushes too.** *Feedback (2026-10-23, same day):* two "HNSW with GPUs" blocks
+    couldn't be aligned. Lining 107 (2×, 18:10–19:15) up under 118 (2×, 23:50) would sit it on
+    119 (3×, 19:00–21:20), and Align's fallback, searching for a centre where everything fits
+    without moving anything else, found none for a 2× block. Align now uses the same push as
+    widening (`pushAside`, shared): every block of the label goes onto the right-clicked
+    block's centre line, and blocks in the way slide outward with their aligned kin. The old
+    nearest-free-centre search is the fallback when pushing would leave the lane.
+33. **Knocks.** *Feedback (2026-10-23, same day):* when moving or widening a block leaves two
+    blocks touching, there should be a small physical effect, as if the block pushed the other
+    a bit further away — about half a 1× width, or less when the panel is full. A pushed block
+    now lands `KNOCK` px clear of what pushed it: 17 (half of BLOCK_W), or 12, 8, 4, 0 —
+    the roomiest that fits in the lane. Touching counts as a hit (within 2 px), not just
+    overlapping, but only for blocks this change moved or widened, so blocks that already sat
+    side by side stay put. On the hit the block squashes horizontally for a beat (to 78 %,
+    anchored on its far side) and then slides off with the usual overshoot; blocks further down
+    a chain of pushes start 90 ms later per link. Dragging joined in: a dropped block knocks
+    what it lands against, and a drop onto a block pushes it aside instead of snapping home
+    (it still snaps home if the push would leave the lane). Reduced motion: no squash, no delay.
+    *Fix (same day):* a TinyFrames block couldn't widen to 2× though a 0-px knock fitted: at
+    gap 0 a pushed block lands flush, flush still counted as touching, and a touch needing no
+    move was taken for "can't get clear". A touch already at the knock distance isn't a hit now;
+    only a real overlap that outward motion can't clear refuses.
 
 ## Current behaviour
 
@@ -284,10 +332,17 @@ Each round was built, installed and tried in the menu bar panel.
   just right of the axis with its tail on the time and shows the time; drag it up or down,
   1:1, to the exact minute. Right-click it → *Remove*.
 
-- **Thin, free blocks:** every block is 34 px wide (about a tenth of the panel) and sits at a
-  free x position — the distances between blocks are the owner's to mean something with (how
-  related the tasks are); the app doesn't interpret them. Blocks that overlap in x are one
-  queue (a core's sequence); blocks apart in x run in parallel.
+- **Thin, free blocks:** a block is 34 px wide (about a tenth of the panel), or a whole
+  multiple of that — right-click → *Width 1× 2× 3× 4×*; wider means the task takes more of
+  her attention. It sits at a free x position — the distances between blocks are the owner's
+  to mean something with (how related the tasks are); the app doesn't interpret them. Blocks
+  whose spans overlap in x are one queue (a core's sequence); blocks apart in x run in
+  parallel. A width change keeps the block's centre line, so aligned blocks stay aligned.
+  Blocks it would now sit on or touch (overlapping in time) are knocked outward, away from
+  that centre line, to land half a 1× width clear (less if the panel is full) — a quick squash
+  on the side it was hit, then a slide with a little overshoot — each taking the blocks aligned
+  with it along, and knocking whatever it meets in turn, a beat later. If that would push something out of the lane, it says there's no room and nothing
+  changes. Past blocks widen the same way.
 - **Create:** press and hold for 400 ms; moving more than 6 px first cancels (unless it becomes a
   drag, below). The die is thrown at the press point — it bounces on the start line, lands on its
   own after about a second (click it to land it early; Escape cancels) — and the block sprouts up
@@ -296,14 +351,19 @@ Each round was built, installed and tried in the menu bar panel.
   the nearest free spot if taken ("No room" if nowhere fits). A press at or after now starts no
   earlier than now, so "hold at the now line" means "start this now". Shrink or stretch with the
   top edge afterwards. With reduced motion there's no die — the block just appears at the rolled
-  length.
+  length. A block placed wholly behind now is a task logged after the fact: it lands finished
+  (`end` = start + rolled length), and its edges still stretch and move it.
 - **Move:** a press on a block that moves mostly sideways drags it 1:1 left or right. Releasing
-  within 10 px of another block's x snaps onto it exactly (queues line up); a landing that would
-  sit on a block it overlaps in time snaps home.
+  with its centre within 10 px of another block's centre snaps onto that centre line exactly.
+  Where it lands it knocks blocks it overlaps in time and touches (or was dropped on) a little
+  way off, as widening does; only if that can't fit in the lane does
+  a landing on a block it overlaps in time snap home.
 - **Align:** right-click a labeled block → *Align* (shown when another block today has the same
-  label and they aren't all lined up already) moves every block of that label to this block's
-  x, or the nearest x where all of them fit; "Can't align" if two of them overlap in time.
-  Blocks sharing a label and an x are joined by a dashed line through the gaps between them —
+  label and they aren't all lined up already) moves every block of that label onto this
+  block's centre line, each keeping its width, pushing other blocks in the way outward the
+  same way widening does — or, if that would push something out of the lane, onto the nearest
+  centre where all of them fit; "Can't align" if two of them overlap in time.
+  Blocks sharing a label and a centre line are joined by a dashed line through the gaps between them —
   derived from the data, not stored, so dragging one away removes its line.
 - **Switching:** right-click a running block → "Switch with …" (other running blocks are listed
   by name or start time) marks 2–3 blocks as switched between, not parallel — one core,
@@ -326,6 +386,9 @@ Each round was built, installed and tried in the menu bar panel.
     from the edge's current speed.
 - **Bottom edge = the start (rigid):** drag it to change the start 1:1 in 5-minute steps. The end stays fixed,
   and it can't go into the previous block in its slot.
+- **Finished blocks** keep both edges, so a block logged after the fact (or ended by Done or
+  the next block) can be fixed up: the top edge moves its end — from where it actually ended,
+  up to now and the next block in its queue — and the bottom edge its start, any length.
 - **Colour:** each block gets the next colour after the last block placed (`PALETTE` in
   `stretch.js`). Black text reads on all of them.
 - **Fill:** the spent part is solid colour, from the bottom up, and the rest is translucent. The fill grows every 5 s
@@ -350,7 +413,7 @@ Each round was built, installed and tried in the menu bar panel.
   ", ~X focused" when some of it was shared, or, past the plan,
   "8:10–9:00 PM · time up, pull to continue".
 - **Right-click:** *Done*, *Stop switching* / *Switch with …* (if running), *Align* (if it
-  applies), *Remove*, then the labels. *Done* ends the block at now, or at its planned end if that has already passed.
+  applies), *Width 1× 2× 3× 4×*, *Remove*, then the labels. *Done* ends the block at now, or at its planned end if that has already passed.
 - **The look:** comic inking — blocks have a thick 2-px ink outline and a halftone shadow to the
   bottom right (the `img/halftone.svg` tile, masked over ink; each shadow is its own layer under
   every block, so it never prints over a neighbour), against the axis's thin hairlines;
@@ -364,9 +427,10 @@ Each round was built, installed and tried in the menu bar panel.
 ## The model
 
 ```
-block   { id, task, x, start, plan (min), created, end, color, label, note, bubbleY }
+block   { id, task, x, span, start, plan (min), created, end, color, label, note, bubbleY }
                                      end is set only by Done; x is the left edge in the
-                                     lane, px; color indexes PALETTE; label is a label id
+                                     lane, whole px; span the width in BLOCK_Ws (1–4;
+                                     missing = 1); color indexes PALETTE; label is a label id
                                      (or null), note a small free note, bubbleY where the
                                      badge was dragged to (px from the block's top, or
                                      null); task is a typed name from before labels, kept
@@ -383,7 +447,8 @@ label   { id, name, archived }       global, not per day — in the "labels" rec
   time. A block runs until the next block *over it in x* begins, and never extends past its
   planned end: when its plan runs out it stops growing but stays running (and stretchable) until
   something ends it. Blocks apart in x run in parallel and never end it. The queue test is
-  pairwise (|Δx| < BLOCK_W), so A–B and B–C can be queues while A and C are not.
+  pairwise (the x spans [x, x + span·BLOCK_W) overlap), so A–B and B–C can be queues while A
+  and C are not — a wide block can share a core with two blocks that run in parallel.
 - **State is derived** from the time and the blocks: `ahead` (start > now), `running`
   (no end yet), `done`.
 - **Placement:** the new block lands at the pressed x; a press within a taken block's last
@@ -399,12 +464,12 @@ label   { id, name, archived }       global, not per day — in the "labels" rec
 
 ## Storage
 
-Each change writes the whole day, `{ date, blocks: [{ id, task, x, start, plan, created,
+Each change writes the whole day, `{ date, blocks: [{ id, task, x, span, start, plan, created,
 end, color, label, note, bubbleY }], switches: [{ id, blocks, from, to }], wake, sleep,
 updatedAt }`, as one
 record in an append-only log. It's written after a placed block's die lands, pulling an edge,
 moving the start edge, moving a block sideways, labeling, editing a note, sliding a badge to a
-new place, placing, dragging or removing a wake/sleep mark, *Done*, *Remove*, forming or
+new place, changing a block's width, placing, dragging or removing a wake/sleep mark, *Done*, *Remove*, forming or
 dissolving a switching group, and when a block's end is first determined (the next block in its
 queue began), so the log keeps those outcomes rather than re-deriving them. The labels live in
 their own record, `{ date: "labels", labels: [{ id, name, archived }], updatedAt }` — keyed "labels" where
@@ -423,7 +488,7 @@ At the top of `src/js/stretch.js`:
 PX 1.6        SNAP 5        ROLL_MIN 30 / ROLL_MAX 100    MIN_PLAN 10    MAX_PLAN 180
 HOLD_MS 400   HOLD_SLOP 6   TAIL_MIN 10
 TENSION 200   RUBBER 36     FOLLOW_K 110 / C 11    SPRING_K 380 / C 14    SQUEEZE 18
-BLOCK_W 34    SWITCH_MAX 3
+BLOCK_W 34    SPAN_MAX 4    KNOCK 17/12/8/4/0    SWITCH_MAX 3
 BALL 5        BALL_AMP 9    BALL_VX 34         TRACE_MS 5000
 ```
 

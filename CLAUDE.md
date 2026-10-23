@@ -3,7 +3,8 @@
 A macOS menu bar app: a day timeline where you press and hold to place a task block — a die
 (the Roll app's ray tracer) bounces at the press point and rolls the block's length, 30–100 min
 — then pull its top edge like a rubber band to shrink or stretch it, and run blocks in parallel
-as thin columns placed freely left to right (blocks that overlap in x are one queue, like
+as thin columns placed freely left to right (1×–4× the narrowest width, wider for the task taking
+the most attention; alignment goes by centre line) (blocks that overlap in x are one queue, like
 processes on a core; 2–3 running blocks can be marked as "switching" — time-sliced on one core,
 not parallel). Blocks aren't named by typing: they're labeled with task types from a global,
 stored label list, and a labeled block wears a speech-bubble badge that opens to the label and a
