@@ -1,0 +1,10 @@
+{
+  // Type-checks the tests (which Node runs straight from .ts) along with what they import.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["src/ts", "test"]
+}

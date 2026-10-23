@@ -4,7 +4,7 @@ How the timeline, the elastic pull and parallel blocks work, and how they got th
 discussion and progress from 2026-10-04 onwards. Storage has its own document,
 [storage.md](storage.md).
 
-Code: `src/js/stretch.js`, `src/css/stretch.css`.
+Code: `src/ts/stretch.ts`, `src/css/stretch.css`.
 
 Stretch began as a second mode ("Stretch mode") inside a Roll app, which picked a block's length
 with a die. Since 2026-10-05 it is the whole app; the Roll app is archived locally (see Legacy in
@@ -119,7 +119,7 @@ Each round was built, installed and tried in the menu bar panel.
       scheduler slices (5-min bands, round-robin by member index) — synthetic and even, since
       the app doesn't see real context switches. Joining or leaving closes the group and opens a
       new one with the new size, so every span keeps the n it ran at; when a member ends, the
-      survivors (if ≥2) continue as a new group. Pure logic in `src/js/switching.js`, tested.
+      survivors (if ≥2) continue as a new group. Pure logic in `src/js/switching.js` (now `src/ts/switching.ts`), tested.
 16. **Thin blocks, free x, instant stripes.** *Feedback (2026-10-18, same day):* marking two
     blocks as switching showed nothing (the slices only accrue with time — minutes before
     anything visible), and four 68-px slots still read as blocks taking up the panel; blocks
@@ -457,7 +457,7 @@ label   { id, name, archived }       global, not per day — in the "labels" rec
 - **Moving:** dropping a block re-sorts it into whatever queue it now overlaps, which can end it
   earlier (a next block above it) or revive the block it used to end. Elements are kept across
   renders, so blocks slide to where they land.
-- **Switching groups** (`src/js/switching.js`, pure, tested): a group never overlaps another for
+- **Switching groups** (`src/ts/switching.ts`, pure, tested): a group never overlaps another for
   the same block — joining and leaving close the old group and open a new one, so each span
   keeps the size it ran at. Focused time is elapsed − Σ shared·(1−1/n). The storage knows
   nothing of groups beyond the day doc.
@@ -482,7 +482,7 @@ so and makes no writes. The design is in [storage.md](storage.md).
 
 ## Tunables
 
-At the top of `src/js/stretch.js`:
+At the top of `src/ts/stretch.ts`:
 
 ```
 PX 1.6        SNAP 5        ROLL_MIN 30 / ROLL_MAX 100    MIN_PLAN 10    MAX_PLAN 180

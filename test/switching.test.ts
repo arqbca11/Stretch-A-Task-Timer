@@ -1,11 +1,11 @@
-// Switching groups: the focused-time split (src/js/switching.js).
+// Switching groups: the focused-time split (src/ts/switching.ts).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { focusedMs } from "../src/js/switching.js";
+import { focusedMs } from "../src/ts/switching.ts";
 
 const MIN = 60000;
 const T0 = Date.parse("2026-10-18T09:00:00");
-const at = (m) => T0 + m * MIN;
+const at = (m: number) => T0 + m * MIN;
 
 test("no groups: focused time is wall time", () => {
   assert.equal(focusedMs(1, at(0), at(40), []), 40 * MIN);

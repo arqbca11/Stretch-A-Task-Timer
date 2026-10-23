@@ -31,9 +31,54 @@
 // Storage: each change writes the whole day, blocks and switching groups, as one record through
 // the bridge to an append-only log in Rust (`stretch.log`; see docs/storage.md). The page keeps
 // no other copy.
-import { dayKeyAt, dayBounds, monthCells } from "./day.js";
-import { focusedMs } from "./switching.js";
-import { rollDie, cancelRoll, dieBusy } from "./dice.js";
+import { dayKeyAt, dayBounds, monthCells } from "./day.ts";
+import { focusedMs } from "./switching.ts";
+import { rollDie, cancelRoll, dieBusy } from "./dice.js";   // hand-kept JS; types in dice.d.ts
+import type { BlockRecord, DayRecord, Label, LabelsRecord, StoredDay, StoredLabels, SwitchGroup } from "./types.ts";
+
+type State = "ahead" | "running" | "done";
+type MarkKind = "wake" | "sleep";
+// A block on show: its stored record plus what's drawn for it, which is never written.
+interface Block extends BlockRecord {
+  el?: BlockEls;          // set by mount
+  state?: State;          // the state it was mounted in
+  anim?: object | null;   // the token of the spring animation running on it
+  inset?: number;         // px: how far it's squeezed in on each side while pulled
+}
+interface BlockEls {
+  root: HTMLDivElement;
+  fill: HTMLDivElement;
+  handle: HTMLDivElement | null;
+  badge: HTMLButtonElement | null;
+  shade: HTMLDivElement;
+}
+// The dashed line between two aligned blocks.
+interface Tie { key: string; el: HTMLDivElement; lo: Block; hi: Block; }
+// A switching ball in the gap between members a and b, which it crosses from lo to hi (px).
+interface Ball {
+  key: string; el: HTMLDivElement; a: Block; b: Block; lo: number; hi: number;
+  x: number; dy: number; sx: number; vy: number;
+  leg: HTMLDivElement | null; tx: number; ty: number;   // the trace leg on show, from (tx, ty)
+}
+// Where blocks are being put by a change, for pushAside; and what it decided.
+type Fixed = Map<Block, { x: number; span: number }>;
+interface Push { pos: Map<Block, number>; hits: Map<Block, { depth: number; dir: number }>; }
+interface Hit { by: Block; o: Block; dir: number; d: number; }   // `by` knocks `o` d px in dir
+interface Press {
+  pointer: number; x0: number; y0: number; x: number; y: number;
+  over: Block | null | undefined; ring: HTMLDivElement; timer: ReturnType<typeof setTimeout>;
+}
+interface Pull {
+  b: Block; pointer: number; x: number; y: number; plan0: number; end0: number | null;
+  base: number; anchor: number; max: number; edge: number; v: number; want: number; last: number;
+  created: boolean; tag: HTMLDivElement; band: HTMLDivElement;
+}
+interface Move {
+  b: Block; pointer: number; y0: number; s0: number; start0: number; end: number;
+  lo: number; hi: number; tag: HTMLDivElement;
+}
+interface Drag { b: Block; pointer: number; x0: number; at: number; dx: number; }
+interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
 
 (function(){
   "use strict";
@@ -87,21 +132,22 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // Switching groups: { id, blocks: [block ids], from, to }, `to` null while on (switching.js).
   // Labels are global, not per day: [{ id, name }], kept in their own "labels" record.
   // Marks: when she got out of bed and went to bed that day, ms or null.
-  var blocks = [], switches = [];
-  var marks = { wake: null, sleep: null };
-  var labels = [], nextLabelId = 1;
-  var dayKey = null, dayStart = 0, dayEnd = 0;
+  var blocks: Block[] = [], switches: SwitchGroup[] = [];
+  var marks: Record<MarkKind, number | null> = { wake: null, sleep: null };
+  var labels: Label[] = [], nextLabelId = 1;
+  var dayKey = "", dayStart = 0, dayEnd = 0;   // set by buildDay
   var following = true;   // showing today, so the view moves on when the day rolls over
-  var pull = null;   // the end edge (on top) being pulled
-  var press = null;  // a press that becomes a block if it's held
-  var move = null;   // the start edge (at the bottom) being moved
-  var drag = null;   // a block being dragged sideways to a new place
+  var pull: Pull | null = null;     // the end edge (on top) being pulled
+  var press: Press | null = null;   // a press that becomes a block if it's held
+  var move: Move | null = null;     // the start edge (at the bottom) being moved
+  var drag: Drag | null = null;     // a block being dragged sideways to a new place
   var nextId = 1;
-  var msgTimer = null;
-  var saved = {};      // the days as loaded and since written, by date
-  var storageDown = null;   // why the stretch log couldn't load; nothing is written then
+  var msgTimer: ReturnType<typeof setTimeout> | undefined;
+  // The days as loaded and since written, by date. The labels record is loaded into `labels`.
+  var saved: Partial<Record<string, StoredDay>> = {};
+  var storageDown: string | null = null;   // why the stretch log couldn't load; nothing is written then
 
-  function $(id){ return document.getElementById(id); }
+  function $(id: string){ return document.getElementById(id)!; }
   var scroller = $("st-scroll"), day = $("st-day"), lane = $("st-lane"), axis = $("st-axis");
   var nowLine = $("st-now");
   // The part of the day already gone (below now, since time runs up) has a grey background.
@@ -111,35 +157,35 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
   /* ---------- time <-> position: time runs upwards, so y counts down from the day's end ---------- */
-  function yOf(ts){ return (dayEnd - ts) / MIN_MS * PX; }
-  function tsAt(y){ return dayEnd - y / PX * MIN_MS; }
-  function snapDown(ts){ var m = SNAP * MIN_MS; return dayStart + Math.floor((ts - dayStart) / m) * m; }
-  function snapUp(ts){ var m = SNAP * MIN_MS; return dayStart + Math.ceil((ts - dayStart) / m) * m; }
-  function clock(ts){ return new Date(ts).toLocaleTimeString(undefined, { hour:"numeric", minute:"2-digit" }); }
-  function shortClock(ts){ var d = new Date(ts); return (d.getHours() % 12 || 12) + ":" + String(d.getMinutes()).padStart(2, "0"); }
-  function hourLabel(h){ return (h % 12 || 12) + (h < 12 ? " am" : " pm"); }
-  function minsBetween(a, b){ return Math.floor((b - a) / MIN_MS); }
+  function yOf(ts: number){ return (dayEnd - ts) / MIN_MS * PX; }
+  function tsAt(y: number){ return dayEnd - y / PX * MIN_MS; }
+  function snapDown(ts: number){ var m = SNAP * MIN_MS; return dayStart + Math.floor((ts - dayStart) / m) * m; }
+  function snapUp(ts: number){ var m = SNAP * MIN_MS; return dayStart + Math.ceil((ts - dayStart) / m) * m; }
+  function clock(ts: number){ return new Date(ts).toLocaleTimeString(undefined, { hour:"numeric", minute:"2-digit" }); }
+  function shortClock(ts: number){ var d = new Date(ts); return (d.getHours() % 12 || 12) + ":" + String(d.getMinutes()).padStart(2, "0"); }
+  function hourLabel(h: number){ return (h % 12 || 12) + (h < 12 ? " am" : " pm"); }
+  function minsBetween(a: number, b: number){ return Math.floor((b - a) / MIN_MS); }
 
   /* ---------- queues: blocks that overlap in x share a core and run in sequence ---------- */
   // A block is `span` BLOCK_Ws wide. Its centre line is what alignment, ties and the magnet go by,
   // so blocks of different widths line up on their middles.
-  function widthOf(b){ return (b.span || 1) * BLOCK_W; }
-  function centreOf(b){ return b.x + widthOf(b) / 2; }
+  function widthOf(b: Block){ return (b.span || 1) * BLOCK_W; }
+  function centreOf(b: Block){ return b.x + widthOf(b) / 2; }
   // x stays on whole pixels (BLOCK_W is even), so centres compare exactly.
-  function clampX(x, w){ return Math.round(Math.max(PAD_L, Math.min(lane.clientWidth - PAD_R - (w || BLOCK_W), x))); }
+  function clampX(x: number, w?: number){ return Math.round(Math.max(PAD_L, Math.min(lane.clientWidth - PAD_R - (w || BLOCK_W), x))); }
   // Whether spans [x, x + w) overlap: then they share a core.
-  function spansMeet(x1, w1, x2, w2){ return x1 < x2 + w2 && x2 < x1 + w1; }
-  function xOverlap(a, b){ return spansMeet(a.x, widthOf(a), b.x, widthOf(b)); }
-  function byId(id){ return blocks.find(function(b){ return b.id === id; }); }
-  function nextAfter(b){
-    var n = null;
+  function spansMeet(x1: number, w1: number, x2: number, w2: number){ return x1 < x2 + w2 && x2 < x1 + w1; }
+  function xOverlap(a: Block, b: Block){ return spansMeet(a.x, widthOf(a), b.x, widthOf(b)); }
+  function byId(id: number){ return blocks.find(function(b){ return b.id === id; }); }
+  function nextAfter(b: Block){
+    var n = null as Block | null;
     blocks.forEach(function(o){
       if (o !== b && xOverlap(o, b) && o.start > b.start && (!n || o.start < n.start)) n = o;
     });
     return n;
   }
-  function prevBefore(b){
-    var p = null;
+  function prevBefore(b: Block){
+    var p = null as Block | null;
     blocks.forEach(function(o){
       if (o !== b && xOverlap(o, b) && o.start < b.start && (!p || o.start > p.start)) p = o;
     });
@@ -149,18 +195,18 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // queue (the next block over it in x) begins, and never later than its planned end: past the
   // plan it stops growing but stays running (and stretchable) until something ends it. Blocks
   // apart in x run in parallel and never end it.
-  function endOf(b, now){
+  function endOf(b: Block, now: number): number | null {
     if (b.end != null) return b.end;
     var n = nextAfter(b);
     if (n && n.start <= now) return Math.min(b.start + b.plan * MIN_MS, n.start);
     return null;
   }
-  function stateOf(b, now){
+  function stateOf(b: Block, now: number): State {
     if (b.start > now) return "ahead";
     return endOf(b, now) == null ? "running" : "done";
   }
   // Where the block's area on the timeline ends: its end, or else its planned end.
-  function extentOf(b, now){
+  function extentOf(b: Block, now: number){
     var e = endOf(b, now);
     return e != null ? e : b.start + b.plan * MIN_MS;
   }
@@ -168,20 +214,20 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // block that has begun can be stretched to now and up to MAX_PLAN beyond it, so coming back
   // late never leaves the block out of reach. A finished block can be stretched up to now, not
   // past it: it's a record of something done, however long it took.
-  function roomAfter(b){
+  function roomAfter(b: Block){
     var now = Date.now();
     var cap = b.end != null ? minsBetween(b.start, now)
       : b.start <= now ? minsBetween(b.start, now) + MAX_PLAN : MAX_PLAN;
     var n = nextAfter(b);
     return Math.min(cap, minsBetween(b.start, n ? n.start : dayEnd));
   }
-  function snapPlan(px, max){
+  function snapPlan(px: number, max: number){
     var m = Math.round(px / PX / SNAP) * SNAP;
     return Math.max(MIN_PLAN, Math.min(max, m));
   }
 
   // Lay every block not mid-gesture out again, and refresh the switching balls.
-  function relayout(now){
+  function relayout(now: number){
     blocks.forEach(function(b){
       if (!b.el || b.anim || (pull && pull.b === b) || (drag && drag.b === b)) return;
       layout(b, null, now);
@@ -196,15 +242,15 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // and the positions, so dragging one away unties it. "Align" in the right-click menu lines up
   // every block of a label at once. Widths can differ: changing one keeps its centre, so the
   // line holds.
-  var ties = [];
-  function kinOf(b){
+  var ties: Tie[] = [];
+  function kinOf(b: Block){
     return b.label == null ? [] : blocks.filter(function(o){ return o.label === b.label; });
   }
   function rebuildTies(){
-    var keep = {};
+    var keep: Partial<Record<string, Tie>> = {};
     ties.forEach(function(t){ keep[t.key] = t; });
     ties = [];
-    var rows = {};   // label:centre → blocks, so each column of a label is tied in start order
+    var rows: Record<string, Block[]> = {};   // label:centre → blocks, so each column of a label is tied in start order
     blocks.forEach(function(b){
       if (b.label == null || !b.el || (drag && drag.b === b)) return;
       var r = b.label + ":" + centreOf(b);
@@ -220,7 +266,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
           var el = document.createElement("div");
           el.className = "st-tie";
           lane.append(el);
-          t = { key: key, el: el };
+          t = { key: key, el: el, lo: row[i], hi: row[i + 1] };
         }
         t.lo = row[i];
         t.hi = row[i + 1];
@@ -228,18 +274,18 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
         ties.push(t);
       }
     });
-    Object.keys(keep).forEach(function(key){ keep[key].el.remove(); });
+    Object.keys(keep).forEach(function(key){ keep[key]!.el.remove(); });
   }
   // From the top of the earlier block up to the bottom of the later one (time runs up).
-  function placeTie(t){
-    var lo = t.lo.el.root, hi = t.hi.el.root;
+  function placeTie(t: Tie){
+    var lo = t.lo.el!.root, hi = t.hi.el!.root;
     var top = hi.offsetTop + hi.offsetHeight, bottom = lo.offsetTop;
     t.el.hidden = bottom - top < 2;
     t.el.style.left = (centreOf(t.lo) - 1) + "px";
     t.el.style.top = top + "px";
     t.el.style.height = Math.max(0, bottom - top) + "px";
   }
-  function placeTiesOf(b){
+  function placeTiesOf(b: Block){
     ties.forEach(function(t){ if (t.lo === b || t.hi === b) placeTie(t); });
   }
 
@@ -247,7 +293,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // aside other blocks in the way (pushAside). If even that finds no room, the nearest centre
   // where all of them fit as things stand is used instead. Blocks of one label that overlap in
   // time can't share a queue, so then nothing moves.
-  function align(b){
+  function align(b: Block){
     var kin = kinOf(b), now = Date.now();
     var seq = kin.slice().sort(function(a, c){ return a.start - c.start; });
     for (var i = 0; i < seq.length - 1; i++) {
@@ -256,7 +302,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
         return;
       }
     }
-    function fits(c){
+    function fits(c: number){
       return kin.every(function(k){
         var x = c - widthOf(k) / 2;
         return clampX(x, widthOf(k)) === x && !blocks.some(function(o){
@@ -265,8 +311,8 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
         });
       });
     }
-    var c0 = centreOf(b), c = null;
-    var fixed = new Map();
+    var c0 = centreOf(b), c: number | null = null;
+    var fixed: Fixed = new Map();
     kin.forEach(function(k){ fixed.set(k, { x: c0 - widthOf(k) / 2, span: k.span || 1 }); });
     var push = shove(fixed, c0);
     if (push) { applyPush(push); return; }
@@ -275,7 +321,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
       else if (fits(c0 - d)) c = c0 - d;
     }
     if (c == null) { say("No room to align these."); return; }
-    kin.forEach(function(k){ k.x = c - widthOf(k) / 2; });
+    kin.forEach(function(k){ k.x = c! - widthOf(k) / 2; });
     render();   // they're one queue now; the slide transition carries them there
     persist();
   }
@@ -291,15 +337,15 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   var BALL = 5, BALL_AMP = 9;          // px: ball size (matches the CSS) and vertical reach
   var BALL_VX = 34;                    // px/s: sideways speed; a leg's vertical speed follows
   var TRACE_MS = 5000;                 // how long a finished leg takes to fade
-  var balls = [], ballsRaf = false, ballLast = 0;
+  var balls: Ball[] = [], ballsRaf = false, ballLast = 0;
 
   // Aim for a new vertical offset on the far block, reached exactly at the next strike.
-  function aim(k){
+  function aim(k: Ball){
     var T = Math.max(0.2, (k.hi - k.lo) / BALL_VX);
     k.vy = ((Math.random() * 2 - 1) * BALL_AMP - k.dy) / T;
   }
-  function ballAt(k, cy){ return { x: k.x + BALL / 2, y: cy + k.dy }; }
-  function legStart(k, cy){
+  function ballAt(k: Ball, cy: number){ return { x: k.x + BALL / 2, y: cy + k.dy }; }
+  function legStart(k: Ball, cy: number){
     if (reduceMotion.matches) return;
     var p = ballAt(k, cy);
     k.tx = p.x;
@@ -308,7 +354,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     k.leg.className = "st-trace";
     lane.append(k.leg);
   }
-  function legUpdate(k, cy){
+  function legUpdate(k: Ball, cy: number){
     if (!k.leg) return;
     var p = ballAt(k, cy);
     k.leg.style.left = k.tx + "px";
@@ -317,7 +363,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     k.leg.style.transform = "rotate(" + Math.atan2(p.y - k.ty, p.x - k.tx) + "rad)";
   }
   // A strike: freeze the leg and let it fade, then start the next one from here.
-  function legEnd(k, cy){
+  function legEnd(k: Ball, cy: number){
     if (!k.leg) return;
     legUpdate(k, cy);
     var el = k.leg;
@@ -327,7 +373,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   }
   // A strike against a block: the ball squashes against the wall for a beat, and two comic
   // accent strokes flare at the contact point — the context switch made visible.
-  function strike(k, dir, cy){
+  function strike(k: Ball, dir: number, cy: number){
     if (reduceMotion.matches) return;
     if (k.el.animate) k.el.animate(
       [{ transform: "scale(.55, 1.45)" }, { transform: "none" }],
@@ -340,23 +386,23 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     setTimeout(function(){ s.remove(); }, 450);
   }
 
-  function hideBall(k){
+  function hideBall(k: Ball){
     k.el.hidden = true;
     if (k.leg) { k.leg.remove(); k.leg = null; }
   }
-  function dropBall(k){
+  function dropBall(k: Ball){
     k.el.remove();
     if (k.leg) k.leg.remove();
   }
 
   function rebuildBalls(){
-    var keep = {};
+    var keep: Partial<Record<string, Ball>> = {};
     balls.forEach(function(k){ keep[k.key] = k; });
     balls = [];
     var now = Date.now(), cy = yOf(now);
     switches.forEach(function(g){
       if (g.to != null) return;
-      var members = g.blocks.map(byId).filter(Boolean).sort(function(a, c){ return a.x - c.x; });
+      var members = g.blocks.map(byId).filter(function(o){ return o !== undefined; }).sort(function(a, c){ return a.x - c.x; });
       for (var i = 0; i < members.length - 1; i++) {
         var lo = members[i].x + widthOf(members[i]) + 1, hi = members[i + 1].x - 1 - BALL;
         if (hi <= lo) continue;
@@ -368,20 +414,21 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
           el.className = "st-ball";
           el.hidden = true;
           lane.append(el);
-          k = { key: key, el: el, x: lo + Math.random() * (hi - lo),
+          k = { key: key, el: el, a: members[i], b: members[i + 1], lo: lo, hi: hi,
+                x: lo + Math.random() * (hi - lo),
                 dy: (Math.random() * 2 - 1) * BALL_AMP,
-                sx: Math.random() < 0.5 ? -1 : 1, leg: null };
+                sx: Math.random() < 0.5 ? -1 : 1, vy: 0, leg: null, tx: 0, ty: 0 };
+          aim(k);
         }
         k.a = members[i];
         k.b = members[i + 1];
         k.lo = lo;
         k.hi = hi;
         k.x = Math.max(lo, Math.min(hi, k.x));
-        if (k.vy == null) aim(k);
         balls.push(k);
       }
     });
-    Object.keys(keep).forEach(function(key){ dropBall(keep[key]); });
+    Object.keys(keep).forEach(function(key){ dropBall(keep[key]!); });
     balls.forEach(function(k){ placeBall(k, now, cy); });
     if (balls.length && !ballsRaf && !reduceMotion.matches) {
       ballsRaf = true;
@@ -391,7 +438,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   }
 
   // Show, hide or pin the ball by the members' state; shared by rebuilds and frames.
-  function placeBall(k, now, cy){
+  function placeBall(k: Ball, now: number, cy: number){
     if (extentOf(k.a, now) <= now || extentOf(k.b, now) <= now) { hideBall(k); return false; }
     if (k.el.hidden) {
       k.el.hidden = false;
@@ -403,7 +450,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     return true;
   }
 
-  function ballFrame(t){
+  function ballFrame(t: number){
     if (!balls.length || reduceMotion.matches) { ballsRaf = false; return; }
     var dt = Math.min(0.05, (t - ballLast) / 1000);
     ballLast = t;
@@ -425,12 +472,12 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   }
 
   /* ---------- switching groups ---------- */
-  function activeGroupOf(b){
+  function activeGroupOf(b: Block){
     return switches.find(function(g){ return g.to == null && g.blocks.indexOf(b.id) >= 0; });
   }
   // Mark b and o as switched between. If b already switches, o joins: the old group is closed
   // and a wider one opens, so each span keeps the size it ran at.
-  function joinSwitch(b, o){
+  function joinSwitch(b: Block, o: Block){
     var now = Date.now();
     var g = activeGroupOf(b);
     var members = g ? g.blocks.slice() : [b.id];
@@ -440,7 +487,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     relayout(now);
     persist();
   }
-  function endSwitch(g){
+  function endSwitch(g: SwitchGroup){
     g.to = Date.now();
     relayout(g.to);
     persist();
@@ -448,7 +495,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
 
   /* ---------- the day ---------- */
   // Show the day `key` ("YYYY-MM-DD"), today if none.
-  function buildDay(key){
+  function buildDay(key?: string){
     var today = dayKeyAt(Date.now());
     dayKey = key || today;
     following = dayKey === today;
@@ -456,7 +503,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     dayStart = bounds.start;
     dayEnd = bounds.end;
     day.style.height = yOf(dayStart) + "px";
-    var opts = { weekday:"long", month:"long", day:"numeric" };
+    var opts: Intl.DateTimeFormatOptions = { weekday:"long", month:"long", day:"numeric" };
     if (dayKey.slice(0, 4) !== today.slice(0, 4)) opts.year = "numeric";
     $("st-date").textContent = new Date(dayStart).toLocaleDateString(undefined, opts);
     $("st-today").hidden = following;
@@ -478,16 +525,16 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     // maps to a column; either way old columns spread out from the left.
     blocks.forEach(function(b){
       if (!b.el) return;
-      b.el.root.remove();
-      b.el.shade.remove();
-      if (b.el.badge) b.el.badge.remove();
+      b.el!.root.remove();
+      b.el!.shade.remove();
+      if (b.el!.badge) b.el!.badge.remove();
     });
     var doc = saved[dayKey] || {};
     var order = (doc.tracks || []).map(function(t){ return t.id; });
     blocks = (doc.blocks || []).map(function(b){
       var x = b.x;
       if (x == null) {
-        var slot = b.slot != null ? b.slot : Math.max(0, order.indexOf(b.track));
+        var slot = b.slot != null ? b.slot : b.track == null ? 0 : Math.max(0, order.indexOf(b.track));
         x = PAD_L + slot * (BLOCK_W + 8);
       }
       var span = Math.max(1, Math.min(SPAN_MAX, b.span || 1));
@@ -500,7 +547,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     switches = (doc.switches || []).map(function(g){
       return { id: g.id, blocks: g.blocks.slice(), from: g.from, to: g.to == null ? null : g.to };
     });
-    blocks.concat(switches).forEach(function(o){ nextId = Math.max(nextId, o.id + 1); });
+    [...blocks, ...switches].forEach(function(o){ nextId = Math.max(nextId, o.id + 1); });
     marks = { wake: doc.wake == null ? null : doc.wake, sleep: doc.sleep == null ? null : doc.sleep };
     renderMarks();
     render();
@@ -517,7 +564,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     tick();
   }
 
-  function button(label, cls, title, fn){
+  function button(label: string, cls: string, title: string, fn: () => void){
     var b = document.createElement("button");
     b.type = "button";
     b.textContent = label;
@@ -527,7 +574,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     return b;
   }
 
-  function mount(b){
+  function mount(b: Block){
     var now = Date.now();
     b.state = stateOf(b, now);
     var root = document.createElement("div");
@@ -563,31 +610,32 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     layout(b, null, now);
   }
 
-  function remount(b){
-    b.el.root.remove();
-    b.el.shade.remove();
-    if (b.el.badge) b.el.badge.remove();
+  function remount(b: Block){
+    b.el!.root.remove();
+    b.el!.shade.remove();
+    if (b.el!.badge) b.el!.badge.remove();
     mount(b);
   }
 
   // The pulling/dragging classes (they kill the slide transition) go to the shade and badge too.
-  function mark(b, cls, on){
-    b.el.root.classList.toggle(cls, on);
-    b.el.shade.classList.toggle(cls, on);
-    if (b.el.badge) b.el.badge.classList.toggle(cls, on);
+  function mark(b: Block, cls: string, on: boolean){
+    b.el!.root.classList.toggle(cls, on);
+    b.el!.shade.classList.toggle(cls, on);
+    if (b.el!.badge) b.el!.badge.classList.toggle(cls, on);
   }
 
   // The badge on a labeled block: a mini bubble — rounded box, sharp tail — wearing the first
   // couple of words of the label. Clicking it pops the big bubble out of it.
-  function syncBadge(b){
+  function syncBadge(b: Block){
+    var r = b.el!;
     var want = b.label != null;
     if (!want) {
-      if (b.el.badge) { b.el.badge.remove(); b.el.badge = null; }
+      if (r.badge) { r.badge.remove(); r.badge = null; }
       return;
     }
-    if (b.el.badge) {   // relabeled: just re-dress it (its width, and so its tail, may change)
-      b.el.badge.firstChild.textContent = labelNameOf(b) || "";
-      b.el.badge.title = labelNameOf(b) || "";
+    if (r.badge) {   // relabeled: just re-dress it (its width, and so its tail, may change)
+      r.badge.firstChild!.textContent = labelNameOf(b) || "";
+      r.badge.title = labelNameOf(b) || "";
       placeBadge(b);
       return;
     }
@@ -605,7 +653,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     // The badge lives in the lane, not in the block, at a z above every block — so no
     // neighbour can ever cover it. placeBadge keeps it pinned to its block.
     lane.append(badge);
-    b.el.badge = badge;
+    r.badge = badge;
     placeBadge(b);
   }
 
@@ -613,7 +661,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // the badge is shifted sideways so the tail's tip lands on the block's centre line. It sits
   // to the right of the centre, or to the left (flipped) near the panel's edge.
   var TAIL_TIP = 7;   // px: the tail tip's x from the box's inner edge on the tail's side
-  function placeBadge(b){
+  function placeBadge(b: Block){
     var r = b.el;
     if (!r || !r.badge) return;
     // The centre from the inline left/width — where the block is going — not offsetLeft, which
@@ -628,29 +676,29 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     r.badge.style.left = (centre - BADGE_INK - tip) + "px";
     // in the tail's coordinates: x from the padding box, y = 0 at the bottom border's inner edge
     var a = flip ? inner - 12 : 4, z = flip ? inner - 4 : 12;
-    r.badge.querySelector("polyline").setAttribute("points",
+    r.badge.querySelector("polyline")!.setAttribute("points",
       a + ",-1 " + tip + ",9 " + z + ",-1");
   }
 
   // Press the badge and drag up or down to slide it along the block (bubbleY, remembered);
   // a press that doesn't move is a click, which pops the bubble out of it.
-  function badgeDrag(b, e){
+  function badgeDrag(b: Block, e: PointerEvent){
     if (e.button !== 0) return;
     e.stopPropagation();
     e.preventDefault();
-    var badge = b.el.badge;
+    var badge = b.el!.badge!;   // only a labeled block has one, and this is its handler
     try { badge.setPointerCapture(e.pointerId); } catch (_) {}
     var y0 = e.clientY, t0 = parseFloat(badge.style.top) || 0, moved = false;
-    var rootTop = b.el.root.offsetTop;
-    function mv(ev){
+    var rootTop = b.el!.root.offsetTop;
+    function mv(ev: PointerEvent){
       if (ev.pointerId !== e.pointerId) return;
       var dy = ev.clientY - y0;
       if (!moved && Math.abs(dy) < 4) return;
       moved = true;
-      var hi = rootTop + Math.max(-8, b.el.root.offsetHeight - 16);
+      var hi = rootTop + Math.max(-8, b.el!.root.offsetHeight - 16);
       badge.style.top = Math.max(rootTop - 8, Math.min(hi, t0 + dy)) + "px";
     }
-    function up(ev){
+    function up(ev: PointerEvent){
       if (ev.pointerId !== e.pointerId) return;
       badge.removeEventListener("pointermove", mv);
       badge.removeEventListener("pointerup", up);
@@ -671,13 +719,13 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   }
 
   // Position a block. `planPx` overrides its length while it's being pulled or settling.
-  function layout(b, planPx, now){
-    var r = b.el;
+  function layout(b: Block, planPx: number | null, now: number){
+    var r = b.el!;
     var live = planPx != null;
-    if (!live) planPx = b.plan * PX;
-    var height, solid;
+    if (planPx == null) planPx = b.plan * PX;
+    var height: number, solid: number;
     if (b.state === "done") {
-      height = solid = live ? planPx : Math.max(3, (endOf(b, now) - b.start) / MIN_MS * PX);
+      height = solid = live ? planPx : Math.max(3, (endOf(b, now)! - b.start) / MIN_MS * PX);
     } else if (b.state === "running") {
       height = planPx;
       solid = Math.min(height, Math.max(0, (now - b.start) / MIN_MS * PX));   // the fill stops at the planned end
@@ -711,9 +759,9 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
 
   // What the hover label says about a block. Focused time is wall time minus the share spent
   // on the other members while switching — elapsed vs CPU time.
-  function infoOf(b, now){
+  function infoOf(b: Block, now: number){
     if (b.state === "done") {
-      var end = endOf(b, now);
+      var end = endOf(b, now)!;
       var mins = minsBetween(b.start, end);
       var fd = Math.floor(focusedMs(b.id, b.start, end, switches) / MIN_MS);
       return clock(b.start) + "–" + clock(end) + " · " + mins + " min" +
@@ -737,7 +785,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   tip.className = "st-tip";
   tip.hidden = true;
   lane.append(tip);
-  function showTip(b, e){
+  function showTip(b: Block, e: MouseEvent){
     if (pull || press || move || drag || menu) { hideTip(); return; }
     var box = lane.getBoundingClientRect();
     var nm = labelNameOf(b);
@@ -749,7 +797,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   }
   function hideTip(){ tip.hidden = true; }
 
-  var menu = null;
+  var menu: HTMLDivElement | null = null;
   // A right-click menu: newMenu() makes an empty one, showMenu() puts it at the pointer.
   function newMenu(){
     closeMenu();
@@ -760,22 +808,22 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     el.setAttribute("role", "menu");
     return el;
   }
-  function showMenu(el, e){
+  function showMenu(el: HTMLDivElement, e: MouseEvent){
     var box = lane.getBoundingClientRect();
     lane.append(el);
     el.style.left = Math.max(4, Math.min(box.width - el.offsetWidth - 4, e.clientX - box.left)) + "px";
     el.style.top = (e.clientY - box.top) + "px";
     menu = el;
-    el.firstChild.focus();
+    (el.firstChild as HTMLElement).focus();
   }
-  function openMenu(b, e){
+  function openMenu(b: Block, e: MouseEvent){
     var el = newMenu();
     var now = Date.now();
     if (b.state === "running") {
       el.append(button("Done", "", "Stop it now", function(){ closeMenu(); finish(b); }));
     }
     if (b.state === "running" && following) {   // switching is about now, so only today
-      var g = activeGroupOf(b);
+      const g = activeGroupOf(b);
       if (g) el.append(button("Stop switching", "", "These run in parallel again",
         function(){ closeMenu(); endSwitch(g); }));
       if ((g ? g.blocks.length : 1) < SWITCH_MAX) {
@@ -848,12 +896,12 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     if (menu) { menu.remove(); menu = null; }
   }
   // How a menu item names another block: its label, a typed name from before labels, or its time.
-  function labelOf(b){
+  function labelOf(b: Block){
     var n = labelNameOf(b) || b.task;
     if (!n) return "the " + shortClock(b.start) + " block";
     return "“" + (n.length > 16 ? n.slice(0, 15) + "…" : n) + "”";
   }
-  function setLabel(b, id){
+  function setLabel(b: Block, id: number | null){
     b.label = id;
     closeBubble(b);
     syncBadge(b);
@@ -861,8 +909,9 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     persist();
   }
   document.addEventListener("pointerdown", function(e){
-    if (menu && !menu.contains(e.target)) closeMenu();
-    if (cal && !cal.contains(e.target) && !calBtn.contains(e.target)) closeCal();
+    var t = e.target as Node;
+    if (menu && !menu.contains(t)) closeMenu();
+    if (cal && !cal.contains(t) && !calBtn.contains(t)) closeCal();
     // the bubble doesn't close on clicks elsewhere: it stays out until its "−" (or Escape)
   }, true);
 
@@ -872,11 +921,11 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // at once, one per block. Each is one SVG, like the reference art: a rounded box with a sharp
   // tail, whose halftone shadow is the same path offset down-right and painted first, so the
   // opaque bubble covers the overlap — nothing is clipped, the tail stays sharp.
-  var bubbles = {};   // the open bubbles, by block id
+  var bubbles: Partial<Record<number, Bubble>> = {};   // the open bubbles, by block id
   var BUB_PATH = "M22 8 L158 8 Q172 8 172 22 L172 80 Q172 94 158 94 L74 94 " +
                  "L46 122 L54 94 L22 94 Q8 94 8 80 L8 22 Q8 8 22 8 Z";
   var BUB_W = 190, BUB_H = 140, TAIL_X = 46, TAIL_Y = 122;   // the tail tip, in bubble px
-  function openBubble(b){
+  function openBubble(b: Block){
     if (bubbles[b.id]) return;
     closeMenu();
     hideTip();
@@ -921,8 +970,8 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     // The tail tip lands on the block's centre line, at the badge's height; the badge hides
     // while the bubble is out. The bubble opens up-right, or mirrored to up-left when there's
     // no room.
-    var badge = b.el.badge;
-    var cx = b.el.root.offsetLeft + b.el.root.offsetWidth / 2;
+    var badge = b.el!.badge!;   // only a labeled block has a bubble
+    var cx = b.el!.root.offsetLeft + b.el!.root.offsetWidth / 2;
     var cy = badge.offsetTop + badge.offsetHeight / 2;
     var left = cx - TAIL_X;
     if (left + BUB_W > lane.clientWidth + 10) {
@@ -931,19 +980,19 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     }
     el.style.left = Math.max(2 - 8, left) + "px";
     el.style.top = Math.max(2, cy - TAIL_Y) + "px";
-    b.el.badge.style.visibility = "hidden";
+    badge.style.visibility = "hidden";
     bubbles[b.id] = { el: el, b: b, save: saveNote };
   }
-  function closeBubble(b){
+  function closeBubble(b: Block){
     var k = bubbles[b.id];
     if (!k) return;
     k.save();
     k.el.remove();
-    if (b.el && b.el.badge) b.el.badge.style.visibility = "";
+    if (b.el && b.el!.badge) b.el!.badge.style.visibility = "";
     delete bubbles[b.id];
   }
   function closeAllBubbles(){
-    Object.keys(bubbles).forEach(function(id){ closeBubble(bubbles[id].b); });
+    Object.values(bubbles).forEach(function(k){ closeBubble(k!.b); });
   }
 
   /* ---------- getting up and going to bed ---------- */
@@ -951,10 +1000,10 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // bubble just right of the axis, its tail pointing at the time, which it also shows. Right-click
   // a blank spot to put one there (or move it there, if the day has one); drag it up or down to
   // the exact minute; right-click it to take it off.
-  var MARKS = { wake: "Got out of bed!", sleep: "Going to bed!" };
-  var markEls = {};
+  var MARKS: Record<MarkKind, string> = { wake: "Got out of bed!", sleep: "Going to bed!" };
+  var markEls: Partial<Record<MarkKind, HTMLDivElement>> = {};
   function renderMarks(){
-    Object.keys(MARKS).forEach(function(kind){
+    (Object.keys(MARKS) as MarkKind[]).forEach(function(kind){
       var el = markEls[kind];
       if (marks[kind] == null) {
         if (el) { el.remove(); delete markEls[kind]; }
@@ -966,7 +1015,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
         el.title = "Drag to the exact time · right-click to remove";
         el.innerHTML = "<b></b><time></time>" +
           '<svg class="st-mark-tail" aria-hidden="true"><polyline points="1,-5 -11,0 1,5" /></svg>';
-        el.firstChild.textContent = MARKS[kind];
+        el.firstChild!.textContent = MARKS[kind];
         el.addEventListener("pointerdown", function(e){ markDrag(kind, e); });
         el.addEventListener("contextmenu", function(e){
           e.preventDefault();
@@ -980,39 +1029,39 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
       placeMark(kind, marks[kind]);
     });
   }
-  function placeMark(kind, ts){
-    markEls[kind].style.top = yOf(ts) + "px";
-    markEls[kind].querySelector("time").textContent = clock(ts);
+  function placeMark(kind: MarkKind, ts: number){
+    markEls[kind]!.style.top = yOf(ts) + "px";
+    markEls[kind]!.querySelector("time")!.textContent = clock(ts);
   }
   // To the minute, inside the day.
-  function clampMark(ts){
+  function clampMark(ts: number){
     return Math.max(dayStart, Math.min(dayEnd - MIN_MS, Math.round(ts / MIN_MS) * MIN_MS));
   }
-  function setMark(kind, ts){
+  function setMark(kind: MarkKind, ts: number | null){
     marks[kind] = ts;
     renderMarks();
-    if (ts != null && !reduceMotion.matches) markEls[kind].animate(
+    if (ts != null && !reduceMotion.matches) markEls[kind]!.animate(
       [{ transform: "translateY(-50%) scale(.6)", opacity: .2 }, { transform: "translateY(-50%)", opacity: 1 }],
       { duration: 240, easing: "cubic-bezier(.2,.9,.3,1.35)" });
     persist();
   }
   // Drag 1:1, a minute at a time; the time inside follows. Scrolling mid-drag counts too.
-  function markDrag(kind, e){
+  function markDrag(kind: MarkKind, e: PointerEvent){
     if (e.button !== 0) return;
     e.stopPropagation();
     e.preventDefault();
     hideTip();
-    var el = markEls[kind];
+    var el = markEls[kind]!;
     try { el.setPointerCapture(e.pointerId); } catch (_) {}
-    var y0 = e.clientY, s0 = scroller.scrollTop, t0 = marks[kind], at = t0;
+    var y0 = e.clientY, s0 = scroller.scrollTop, t0 = marks[kind]!, at = t0;
     el.classList.add("dragging");
-    function mv(ev){
+    function mv(ev: PointerEvent){
       if (ev.pointerId !== e.pointerId) return;
       var dy = ev.clientY - y0 + (scroller.scrollTop - s0);
       at = clampMark(t0 - dy / PX * MIN_MS);   // up is later
       placeMark(kind, at);
     }
-    function up(ev){
+    function up(ev: PointerEvent){
       if (ev.pointerId !== e.pointerId) return;
       el.removeEventListener("pointermove", mv);
       el.removeEventListener("pointerup", up);
@@ -1029,12 +1078,12 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   }
   // Right-click a blank spot: put a mark there.
   lane.addEventListener("contextmenu", function(e){
-    if (e.target.closest(".st-block, .st-bub-icon, .st-bubble, .st-menu, .st-mark, .st-die")) return;
+    if ((e.target as Element).closest(".st-block, .st-bub-icon, .st-bubble, .st-menu, .st-mark, .st-die")) return;
     e.preventDefault();
     if (pull || move || drag || storageDown) return;
     var ts = clampMark(tsAt(e.clientY - lane.getBoundingClientRect().top));
     var el = newMenu();
-    Object.keys(MARKS).forEach(function(kind){
+    (Object.keys(MARKS) as MarkKind[]).forEach(function(kind){
       el.append(button(MARKS[kind], "", (marks[kind] == null ? "Mark it at " : "Move it to ") + clock(ts),
         function(){ closeMenu(); setMark(kind, ts); }));
     });
@@ -1046,10 +1095,10 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // ringed and the day on show is filled. Any day can be opened: a past one to look back (and
   // touch up), a future one to plan — its blocks are saved under its date like any day's, so
   // they're simply there when it comes.
-  var calBtn = $("st-cal-btn"), cal = null, calMonth = null;
+  var calBtn = $("st-cal-btn"), cal: HTMLDivElement | null = null, calMonth = { y: 0, m: 0 };
   calBtn.addEventListener("click", function(){ if (cal) closeCal(); else openCal(); });
   $("st-today").addEventListener("click", function(){ showDay(dayKeyAt(Date.now())); });
-  function showDay(key){
+  function showDay(key: string){
     closeCal();
     buildDay(key);
     scrollToDay();
@@ -1065,18 +1114,18 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     calBtn.setAttribute("aria-expanded", "true");
     drawCal();
   }
-  function stepMonth(d){
+  function stepMonth(d: number){
     var t = new Date(calMonth.y, calMonth.m + d, 1);
     calMonth = { y: t.getFullYear(), m: t.getMonth() };
     drawCal();
   }
-  function hasDay(key){
+  function hasDay(key: string){
     var d = saved[key];
     return !!d && ((d.blocks || []).length > 0 || d.wake != null || d.sleep != null);
   }
   function drawCal(){
     var today = dayKeyAt(Date.now());
-    cal.textContent = "";
+    cal!.textContent = "";
     var head = document.createElement("div");
     head.className = "st-cal-head";
     var title = document.createElement("b");
@@ -1102,7 +1151,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
       d.classList.toggle("has", hasDay(c.key));
       grid.append(d);
     });
-    cal.append(head, grid);
+    cal!.append(head, grid);
   }
   function closeCal(){
     if (!cal) return;
@@ -1116,7 +1165,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // order by the bridge, so the last one is the day as it stands.
   function persist(){
     if (storageDown) return;
-    var doc = {
+    var doc: DayRecord = {
       date: dayKey,
       blocks: blocks.map(function(b){
         return { id: b.id, task: b.task, x: b.x, span: b.span, start: b.start, plan: b.plan,
@@ -1140,19 +1189,18 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // at labels by id, so a rename would reach every day that uses it. Deleting a label archives
   // it: it stays in the record (blocks that wear it keep their name and badge, on any day) but
   // leaves the menu's list.
-  function labelById(id){ return labels.find(function(l){ return l.id === id; }); }
-  function labelNameOf(b){ var l = b.label == null ? null : labelById(b.label); return l ? l.name : null; }
+  function labelById(id: number){ return labels.find(function(l){ return l.id === id; }); }
+  function labelNameOf(b: Block): string | null { var l = b.label == null ? null : labelById(b.label); return l ? l.name : null; }
   function persistLabels(){
     if (storageDown) return;
-    var doc = { date: "labels",
+    var doc: LabelsRecord = { date: "labels",
                 labels: labels.map(function(l){ return { id: l.id, name: l.name, archived: l.archived }; }),
                 updatedAt: Date.now() };
-    saved.labels = doc;
     window.stretch.putDay(doc).catch(function(err){ say("Not saved: " + err); });
   }
   // Add a label by name; an existing name (case-insensitively) is reused, not duplicated — an
   // archived one comes back to the list, same id.
-  function addLabel(name){
+  function addLabel(name: string){
     name = name.trim();
     if (!name) return null;
     var have = labels.find(function(l){ return l.name.toLowerCase() === name.toLowerCase(); });
@@ -1165,14 +1213,14 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     persistLabels();
     return l;
   }
-  function archiveLabel(l){
+  function archiveLabel(l: Label){
     l.archived = true;
     persistLabels();
     say("Deleted “" + l.name + "” from the list.");
   }
 
   /* ---------- actions ---------- */
-  function say(text){
+  function say(text: string){
     var el = $("st-msg");
     el.textContent = text;
     clearTimeout(msgTimer);
@@ -1184,7 +1232,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // There's no pointer capture during the hold, so a quick double-click still reaches the block.
   lane.addEventListener("pointerdown", function(e){
     if (e.button !== 0 || pull || press || move || drag || storageDown || dieBusy()) return;
-    if (e.target.closest("button, .st-handle, .st-menu, .st-bubble, .st-die, .st-mark")) return;
+    if ((e.target as Element).closest("button, .st-handle, .st-menu, .st-bubble, .st-die, .st-mark")) return;
     e.preventDefault();
     hideTip();
     var box = lane.getBoundingClientRect();
@@ -1195,15 +1243,15 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     ring.style.animationDuration = HOLD_MS + "ms";
     ring.style.setProperty("--st-c", PALETTE[nextColor()]);   // the colour the block will be
     lane.append(ring);
-    var overEl = e.target.closest(".st-block");
+    var overEl = (e.target as Element).closest(".st-block");
     press = { pointer: e.pointerId, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY,
-              over: overEl && blocks.find(function(b){ return b.el && b.el.root === overEl; }),
+              over: overEl && blocks.find(function(b){ return b.el && b.el!.root === overEl; }),
               ring: ring, timer: setTimeout(placeBlock, HOLD_MS) };
   });
 
   // The colour after the most recently placed block's.
   function nextColor(){
-    var last = null;
+    var last = null as Block | null;
     blocks.forEach(function(b){ if (!last || b.created > last.created) last = b; });
     return last ? (last.color + 1) % PALETTE.length : 0;
   }
@@ -1216,7 +1264,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   }
 
   // The block (other than `b`) that a 1× block at `x` starting at `start` would sit on.
-  function clashAt(x, start, now, b){
+  function clashAt(x: number, start: number, now: number, b: Block | null){
     return blocks.find(function(o){
       return o !== b && spansMeet(o.x, widthOf(o), x, BLOCK_W) &&
         o.start < start + MIN_PLAN * MIN_MS && start < extentOf(o, now);
@@ -1224,7 +1272,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   }
 
   function placeBlock(){
-    var p = press;
+    var p = press!;
     press = null;
     p.ring.remove();
     var now = Date.now();
@@ -1240,7 +1288,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     // follows that block instead of landing on it; otherwise a taken spot nudges the new block
     // to the nearest free x.
     var x0 = clampX(p.x - box.left - BLOCK_W / 2), x = x0, start = start0;
-    var clash = clashAt(x, start, now, null);
+    var clash: Block | null | undefined = clashAt(x, start, now, null);
     if (clash && clash.start < start && extentOf(clash, now) - start <= TAIL_MIN * MIN_MS) {
       start = snapUp(extentOf(clash, now));
       clash = clashAt(x, start, now, null);
@@ -1251,7 +1299,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     }
     if (clash) { say("No room for a block here."); return; }
 
-    var b = { id: nextId++, task: "", x: x, span: 1, start: start, plan: MIN_PLAN, created: now, end: null,
+    var b: Block = { id: nextId++, task: "", x: x, span: 1, start: start, plan: MIN_PLAN, created: now, end: null,
               color: nextColor(), label: null, note: "", bubbleY: null };
     var room = roomAfter(b);
     if (room < MIN_PLAN) { say("No room for a block here."); return; }
@@ -1270,7 +1318,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
       // A block placed behind now may end one that was still going, so bring them all up to date.
       render();
       if (!reduceMotion.matches) {
-        b.el.root.animate([{ transform: "scale(.92, .6)", opacity: .2 }, { transform: "none", opacity: 1 }],
+        b.el!.root.animate([{ transform: "scale(.92, .6)", opacity: .2 }, { transform: "none", opacity: 1 }],
           { duration: 280, easing: "cubic-bezier(.2,.9,.3,1.35)" });
       }
       var tag = document.createElement("div");
@@ -1292,30 +1340,31 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // { pos: every moved block's new x, hits: each pushed block's { depth, dir } (1 = hit by a
   // fixed block, 2 = by one of those…) }, or null if something would have to leave the lane.
   // Nothing is changed here.
-  function pushAside(fixed, c, gap){
+  function pushAside(fixed: Fixed, c: number, gap: number): Push | null {
     var now = Date.now(), pos = new Map(), hits = new Map();
     fixed.forEach(function(f, k){ pos.set(k, f.x); });
-    function px(k){ return pos.has(k) ? pos.get(k) : k.x; }
-    function wd(k){ return (fixed.has(k) ? fixed.get(k).span : k.span || 1) * BLOCK_W; }
-    function together(a, k){ return a.start < extentOf(k, now) && k.start < extentOf(a, now); }
-    function fits(k, x){ return clampX(x, wd(k)) === x; }
+    function px(k: Block){ return pos.has(k) ? pos.get(k)! : k.x; }
+    function wd(k: Block){ return (fixed.has(k) ? fixed.get(k)!.span : k.span || 1) * BLOCK_W; }
+    function together(a: Block, k: Block){ return a.start < extentOf(k, now) && k.start < extentOf(a, now); }
+    function fits(k: Block, x: number){ return clampX(x, wd(k)) === x; }
     // touching counts (within 2 px): a block that comes up against another knocks it
-    function near(a, k){ return px(a) < px(k) + wd(k) + 2 && px(k) < px(a) + wd(a) + 2; }
+    function near(a: Block, k: Block){ return px(a) < px(k) + wd(k) + 2 && px(k) < px(a) + wd(a) + 2; }
     // only what this change moves or widens can knock anything; blocks already side by side stay
-    function changed(k){ return pos.has(k) && (pos.get(k) !== k.x || wd(k) !== widthOf(k)); }
+    function changed(k: Block){ return pos.has(k) && (pos.get(k) !== k.x || wd(k) !== widthOf(k)); }
     var ok = true;
     pos.forEach(function(x, k){ if (!fits(k, x)) ok = false; });
     for (var guard = 0; ok; guard++) {
       if (guard > 500) return null;
       // a moved block on or against another: the one further from c gives way (a fixed one never
       // does), outward, to land `gap` clear. A touch that's already that far apart isn't a hit.
-      var hit = null;
+      var hit = null as Hit | null | false;
       blocks.forEach(function(p){
         if (hit === false || !changed(p)) return;
         blocks.forEach(function(o){
           if (hit || hit === false || p === o || fixed.has(o) || !together(p, o) || !near(p, o)) return;
           var dp = Math.abs(centreOf(p) - c), dq = Math.abs(centreOf(o) - c);
-          var h = fixed.has(p) || dq > dp || (dq === dp && p.id < o.id) ? { by: p, o: o } : { by: o, o: p };
+          var h: Hit = fixed.has(p) || dq > dp || (dq === dp && p.id < o.id)
+            ? { by: p, o: o, dir: 0, d: 0 } : { by: o, o: p, dir: 0, d: 0 };
           if (fixed.has(h.o)) return;
           h.dir = centreOf(h.o) < c ? -1 : 1;
           var to = h.dir < 0 ? Math.min(px(h.o), px(h.by) - wd(h.o) - gap)
@@ -1328,13 +1377,13 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
       if (hit === false) return null;
       if (!hit) return { pos: pos, hits: hits };
       var o = hit.o, by = hit.by, dir = hit.dir, d = hit.d;
-      var depth = (hits.has(by) ? hits.get(by).depth : 0) + 1;
+      var depth = (hits.has(by) ? hits.get(by)!.depth : 0) + 1;
       (o.label == null ? [o] : blocks.filter(function(k){
         return k.label === o.label && centreOf(k) === centreOf(o);
       })).forEach(function(k){
         if (fixed.has(k) || !fits(k, px(k) + d)) ok = false;
         pos.set(k, px(k) + d);
-        if (!hits.has(k) || hits.get(k).depth > depth) hits.set(k, { depth: depth, dir: dir });
+        if (!hits.has(k) || hits.get(k)!.depth > depth) hits.set(k, { depth: depth, dir: dir });
       });
     }
     return null;
@@ -1343,7 +1392,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // Change how wide a block is, keeping its centre line — so a block aligned with others stays
   // aligned — and pushing aside what's in the way. A wider block can join a queue it didn't touch
   // before, and so end (or be ended by) a block there, like dragging it would.
-  function setSpan(b, n){
+  function setSpan(b: Block, n: number){
     var c = centreOf(b);
     var push = shove(new Map([[b, { x: c - n * BLOCK_W / 2, span: n }]]), c);
     if (!push) { say("No room to make it " + n + "× wide here."); return; }
@@ -1352,7 +1401,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   }
 
   // pushAside with the roomiest knock that fits: half a narrow block clear, less when it's full.
-  function shove(fixed, c){
+  function shove(fixed: Fixed, c: number){
     for (var i = 0; i < KNOCK.length; i++) {
       var push = pushAside(fixed, c, KNOCK[i]);
       if (push) return push;
@@ -1362,12 +1411,12 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // Move everything to where pushAside put it. A pushed block is knocked: it squashes for a beat
   // on the side it was hit from, then slides off — the slide transition's overshoot is its
   // bounce. Blocks further down a chain of pushes are hit a little later.
-  function applyPush(push){
+  function applyPush(push: Push){
     push.pos.forEach(function(x, k){ k.x = x; });
     if (!reduceMotion.matches) push.hits.forEach(function(h, k){
       if (!k.el) return;
       var delay = 50 + (h.depth - 1) * 90;
-      var els = [k.el.root, k.el.shade, k.el.badge].filter(Boolean);
+      var els = [k.el.root, k.el.shade, k.el.badge].filter(function(el){ return el != null; });
       els.forEach(function(el){ el.style.transitionDelay = delay + "ms"; });
       setTimeout(function(){
         els.forEach(function(el){ el.style.transitionDelay = ""; });
@@ -1384,39 +1433,39 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
 
   // Done ends the block where it stands: now, or its planned end if that has already passed
   // (the block stopped growing there).
-  function finish(b){
+  function finish(b: Block){
     b.end = Math.min(Date.now(), b.start + b.plan * MIN_MS);
     render();
     persist();
   }
-  function remove(b){
+  function remove(b: Block){
     hideTip();
     closeBubble(b);
-    b.el.root.remove();
-    b.el.shade.remove();
-    if (b.el.badge) b.el.badge.remove();
+    b.el!.root.remove();
+    b.el!.shade.remove();
+    if (b.el!.badge) b.el!.badge.remove();
     blocks = blocks.filter(function(o){ return o !== b; });
     render();   // tick closes any switching group the block was in
     persist();
   }
 
   /* ---------- pulling the end edge (the top one) upwards ---------- */
-  function give(over){ return RUBBER * (1 - 1 / (over * 0.55 / RUBBER + 1)); }
-  function rubber(px, lo, hi){
+  function give(over: number){ return RUBBER * (1 - 1 / (over * 0.55 / RUBBER + 1)); }
+  function rubber(px: number, lo: number, hi: number){
     if (px > hi) return hi + give(px - hi);
     if (px < lo) return Math.max(4, lo - give(lo - px));
     return px;
   }
 
-  function grabHandle(b, e){
+  function grabHandle(b: Block, e: PointerEvent){
     if (e.button !== 0 || pull || press || move || drag) return;
     e.preventDefault();
     e.stopPropagation();
-    try { e.target.setPointerCapture(e.pointerId); } catch (_) {}
+    try { (e.target as Element).setPointerCapture(e.pointerId); } catch (_) {}
     beginPull(b, e.pointerId, e.clientX, e.clientY, false);
   }
 
-  function beginPull(b, pointer, x, y, created){
+  function beginPull(b: Block, pointer: number, x: number, y: number, created: boolean){
     b.anim = null;   // grab it even mid-bounce
     var tag = document.createElement("div");
     tag.className = "st-tag";
@@ -1440,7 +1489,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     requestAnimationFrame(pullFrame);
   }
 
-  function pullFrame(t){
+  function pullFrame(t: number){
     var p = pull;
     if (!p) return;
     var b = p.b;
@@ -1490,7 +1539,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     requestAnimationFrame(pullFrame);
   }
 
-  function endPull(e, cancel){
+  function endPull(e: PointerEvent | null, cancel: boolean){
     if (!pull || (e && e.pointerId !== pull.pointer)) return;
     var p = pull, b = p.b;
     pull = null;
@@ -1509,7 +1558,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   }
 
   // Spring the edge from where it was let go onto its 5-minute step, keeping its speed.
-  function settle(b, from, to, v0){
+  function settle(b: Block, from: number, to: number, v0: number){
     if (reduceMotion.matches) { layout(b, null, Date.now()); return; }
     var token = {}, x = from, v = v0 || 0, last = performance.now();
     b.anim = token;
@@ -1526,11 +1575,11 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   }
 
   /* ---------- moving the start edge (the bottom one): 1:1, no elasticity; the end stays put ---------- */
-  function grabStart(b, e){
+  function grabStart(b: Block, e: PointerEvent){
     if (e.button !== 0 || pull || press || move || drag) return;
     e.preventDefault();
     e.stopPropagation();
-    try { e.target.setPointerCapture(e.pointerId); } catch (_) {}
+    try { (e.target as Element).setPointerCapture(e.pointerId); } catch (_) {}
     var now = Date.now(), end = b.end != null ? b.end : b.start + b.plan * MIN_MS, prev = prevBefore(b);
     var lo = prev ? extentOf(prev, now) : dayStart;
     var tag = document.createElement("div");
@@ -1543,8 +1592,8 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     mark(b, "pulling", true);
     moveStart(e.clientY);
   }
-  function moveStart(y){
-    var m = move, b = m.b;
+  function moveStart(y: number){
+    var m = move!, b = m.b;
     var dy = y - m.y0 + (scroller.scrollTop - m.s0);
     var start = snapDown(m.start0 - dy / PX * MIN_MS + SNAP / 2 * MIN_MS);   // up is later
     start = Math.max(m.lo, Math.min(m.hi, start));
@@ -1555,7 +1604,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     m.tag.style.top = yOf(start) + "px";
     m.tag.style.left = (b.x + 4) + "px";
   }
-  function endMove(e){
+  function endMove(e: PointerEvent | null){
     if (!move || (e && e.pointerId !== move.pointer)) return;
     var m = move;
     move = null;
@@ -1570,31 +1619,31 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // the pointer 1:1 — x is free, so where it lands (and how close to the others) can mean
   // whatever she wants. Releasing near another block's x lines the queue up exactly; a landing
   // that would sit on a block it overlaps in time snaps home.
-  function beginDrag(b, pointer, x){
+  function beginDrag(b: Block, pointer: number, x: number){
     try { lane.setPointerCapture(pointer); } catch (_) {}
     b.anim = null;
     drag = { b: b, pointer: pointer, x0: b.x, at: b.x,
-             dx: x - b.el.root.getBoundingClientRect().left };
+             dx: x - b.el!.root.getBoundingClientRect().left };
     mark(b, "dragging", true);
     hideTip();
     rebuildTies();   // a block on the move is untied until it lands
     moveDrag(x);
   }
-  function moveDrag(x){
-    var d = drag;
+  function moveDrag(x: number){
+    var d = drag!;
     d.at = clampX(x - lane.getBoundingClientRect().left - d.dx, widthOf(d.b));
-    d.b.el.root.style.left = d.at + "px";
-    d.b.el.shade.style.left = (d.at + SHADE_X) + "px";
+    d.b.el!.root.style.left = d.at + "px";
+    d.b.el!.shade.style.left = (d.at + SHADE_X) + "px";
     placeBadge(d.b);
   }
   // Whether b, put at `x`, would be clear of every block it overlaps in time.
-  function freeAt(x, b){
+  function freeAt(x: number, b: Block){
     var now = Date.now(), ext = extentOf(b, now);
     return !blocks.some(function(o){
       return o !== b && spansMeet(o.x, widthOf(o), x, widthOf(b)) && o.start < ext && b.start < extentOf(o, now);
     });
   }
-  function endDrag(e, cancel){
+  function endDrag(e: PointerEvent | null, cancel: boolean){
     if (!drag || (e && e.pointerId !== drag.pointer)) return;
     var d = drag, b = d.b;
     drag = null;
@@ -1602,12 +1651,12 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     var to = d.x0;
     if (!cancel) {
       // the magnet: a block whose centre line is within 10 px of the landing's
-      var c = d.at + widthOf(b) / 2, near = null;
+      var c = d.at + widthOf(b) / 2, near = null as Block | null;
       blocks.forEach(function(o){
         if (o !== b && Math.abs(centreOf(o) - c) < 10 &&
             (!near || Math.abs(centreOf(o) - c) < Math.abs(centreOf(near) - c))) near = o;
       });
-      var onNear = near && centreOf(near) - widthOf(b) / 2;
+      var onNear = near ? centreOf(near) - widthOf(b) / 2 : 0;
       if (near && clampX(onNear, widthOf(b)) !== onNear) near = null;
       var landed = (near ? [onNear, d.at] : [d.at]).find(function(x){ return freeAt(x, b); });
       // Where it lands it knocks what it's up against (or dropped on) a little way off, as
@@ -1676,7 +1725,7 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     nowLine.hidden = now < dayStart || now >= dayEnd;
     nowLine.style.top = yOf(now) + "px";
     past.style.top = Math.max(0, Math.min(yOf(dayStart), yOf(now))) + "px";
-    nowLine.firstChild.textContent = shortClock(now);
+    nowLine.firstChild!.textContent = shortClock(now);
     var ended = false;
     blocks.forEach(function(b){
       if ((pull && pull.b === b) || (move && move.b === b) || (drag && drag.b === b)) return;
@@ -1714,9 +1763,9 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
   // Today opens at now; another day at its first block or mark, or else at 8 am, two thirds
   // of the way down.
   function scrollToDay(){
-    var at = Date.now();
+    var at: number | null = Date.now();
     if (!following) {
-      at = null;
+      at = null as number | null;
       blocks.forEach(function(b){ if (at == null || b.start < at) at = b.start; });
       if (marks.wake != null && (at == null || marks.wake < at)) at = marks.wake;
       if (at == null) at = dayStart + (8 * 60 - (4 * 60 + 30)) * MIN_MS;
@@ -1724,8 +1773,11 @@ import { rollDie, cancelRoll, dieBusy } from "./dice.js";
     scroller.scrollTop = yOf(at) - scroller.clientHeight * 0.67;
   }
   window.stretch.load().then(function(days){
-    saved = days || {};
-    labels = ((saved.labels || {}).labels || []).map(function(l){ return { id: l.id, name: String(l.name), archived: !!l.archived }; });
+    var all = days || {};
+    var stored = all.labels as StoredLabels | undefined;
+    delete all.labels;
+    saved = all as Partial<Record<string, StoredDay>>;
+    labels = ((stored || {}).labels || []).map(function(l){ return { id: l.id!, name: String(l.name), archived: !!l.archived }; });
     labels.forEach(function(l){ nextLabelId = Math.max(nextLabelId, l.id + 1); });
     start();
   }, function(err){

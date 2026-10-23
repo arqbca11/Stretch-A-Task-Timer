@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dayKeyAt, dayBounds, monthCells } from "../src/js/day.js";
+import { dayKeyAt, dayBounds, monthCells } from "../src/ts/day.ts";
 
-const at = (h, m, date, month = 9) => new Date(2026, month - 1, date, h, m).getTime();
+const at = (h: number, m: number, date: number, month = 9) => new Date(2026, month - 1, date, h, m).getTime();
 
 test("dayKeyAt: the day rolls over at 4:30 am", () => {
   assert.equal(dayKeyAt(at(4, 29, 26)), "2026-09-25");

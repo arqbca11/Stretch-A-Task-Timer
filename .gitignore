@@ -1,6 +1,10 @@
 node_modules/
 src-tauri/target/
 src-tauri/gen/
+
+# Compiled from src/ts by tsc (npm run build). dice.js is hand-kept, ported verbatim from Roll.
+src/js/*
+!src/js/dice.js
 .DS_Store
 
 # The Roll app (die, block timer, Tetris rewards) and its personal history, kept locally for

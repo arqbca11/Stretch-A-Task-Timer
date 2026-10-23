@@ -48,8 +48,8 @@ The unit of storage is a **day**: the page's whole state for one logical day (4:
 ```
 
 Rust treats a day as **opaque JSON** (`serde_json::Value`) and reads only `date`. The schema
-belongs to the page (`src/js/stretch.js`). Rust doesn't duplicate it, so a new block field
-needs no Rust change and no migration.
+belongs to the page: it's typed in `src/ts/types.ts` and written by `src/ts/stretch.ts`. Rust
+doesn't duplicate it, so a new block field needs no Rust change and no migration.
 
 One record is not a calendar day: the page keeps its global label list (task types blocks point
 at by id) in a day-shaped record keyed `date: "labels"` —

@@ -19,9 +19,17 @@ Read before changing things:
 
 ## Stack and decisions
 
-- **Tauri 2**, Rust backend. Frontend is plain HTML/JS served as-is from `src/` (no framework, no
-  bundler): `build.frontendDist: "../src"`, `app.withGlobalTauri: true`, so the page uses
-  `window.__TAURI__.core.invoke` and `window.__TAURI__.event.listen` directly.
+- **Tauri 2**, Rust backend. Frontend is plain HTML plus TypeScript, no framework and no bundler:
+  `tsc` compiles `src/ts/*.ts` file for file to ES modules in `src/js/` (gitignored, except the
+  hand-kept `dice.js`), and `src/` is served as-is (`build.frontendDist: "../src"`).
+  `beforeDevCommand` runs `tsc --watch`, `beforeBuildCommand` runs `tsc`.
+  `app.withGlobalTauri: true`, so the bridge uses `window.__TAURI__.core.invoke` and
+  `window.__TAURI__.event.listen` directly, typed in `bridge.ts` (no `@tauri-apps/api`).
+- **TypeScript**: `strict`, and only erasable syntax (`erasableSyntaxOnly`: no enums,
+  namespaces or parameter properties), so Node runs the sources directly for the tests. Sources
+  import each other as `./x.ts`; `rewriteRelativeImportExtensions` turns that into `./x.js` on
+  emit. The record schema lives in `src/ts/types.ts`; `StretchBridge` is the seam a phone or
+  browser build would implement with its own storage.
 - Target macOS on Apple Silicon (`aarch64-apple-darwin`). The page runs in WKWebView (WebKit/JSC),
   not Chromium: check pointer events, `Element.animate` and timing behave the same.
 - **Menu-bar-only app**: `ActivationPolicy::Accessory` in `setup` and `LSUIElement` in
@@ -42,16 +50,20 @@ Read before changing things:
 src/                     frontend, served as-is
   index.html             the panel: header (date, Today pill, calendar icon) + timeline (axis,
                          lane, now dot)
-  js/stretch.js          the whole UI: timeline, press-and-hold, the roll, elastic pull, free x
+  ts/                    the page's source; tsc emits each file to js/ under the same name
+  ts/types.ts            the record schema (DayRecord, BlockRecord, SwitchGroup, LabelsRecord,
+                         what load() can return) and the StretchBridge interface
+  ts/stretch.ts          the whole UI: timeline, press-and-hold, the roll, elastic pull, free x
                          placement, sideways drag, colours, hover label, right-click menu,
                          labels and speech bubbles, switching groups, wake/sleep marks, the
                          calendar (other days), persistence
   js/dice.js             the ray-traced die + its physics, ported verbatim from legacy/roll
-                         (see "Legacy"); rollDie/cancelRoll/dieBusy
-  js/day.js              pure: dayKeyAt, dayBounds (4:30 am day boundary), monthCells (the
+                         (see "Legacy"); rollDie/cancelRoll/dieBusy. Stays JS, typed by
+                         ts/dice.d.ts
+  ts/day.ts              pure: dayKeyAt, dayBounds (4:30 am day boundary), monthCells (the
                          calendar grid); shared with tests
-  js/switching.js        pure: focused time for switching groups; shared with tests
-  js/bridge.js           window.stretch = { load, putDay, panelVisible } over invoke; ordered
+  ts/switching.ts        pure: focused time for switching groups; shared with tests
+  ts/bridge.ts           window.stretch = { load, putDay, panelVisible } over invoke; ordered
                          write queue; forwards "panel-visibility" as the "stretch:visibility" event
   css/stretch.css        all styles; tokens on :root with dark mode
   css/fonts.css, fonts/  Karla 400/500/700
@@ -66,7 +78,7 @@ src-tauri/
   icons/                 trayTemplate.png/@2x (monochrome template) + app icons
   tauri.conf.json
 scripts/draw-icons.swift draws the tray and app icons (CoreGraphics); regenerate commands inside
-test/                    node --test suites for src/js/day.js and src/js/switching.js
+test/                    node --test suites (.ts, run directly) for src/ts/day.ts and switching.ts
 docs/                    interaction.md, storage.md
 legacy/                  gitignored, local only: the archived Roll app (see Legacy)
 ```
@@ -156,11 +168,14 @@ export; `legacy/roll/README.md` maps it, including line ranges for the die.
 
 ## Commands
 
-Prerequisites: Rust via rustup, Xcode Command Line Tools, Node (for the Tauri CLI and JS tests).
+Prerequisites: Rust via rustup, Xcode Command Line Tools, Node 23.6+ (for the Tauri CLI, `tsc`,
+and the tests, which Node runs straight from `.ts`).
 
 ```
 npm install                    # @tauri-apps/cli
 npm run tauri dev
+npm run build                  # tsc: src/ts -> src/js (tauri dev/build run this themselves)
+npm run typecheck              # tsc --noEmit over src/ts and test/
 npm test                       # node --test test/
 cargo test --manifest-path src-tauri/Cargo.toml
 npm run tauri build -- --target aarch64-apple-darwin
