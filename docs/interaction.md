@@ -325,6 +325,15 @@ Each round was built, installed and tried in the menu bar panel.
     block ended because the next block in its queue began stays capped by that block, which is
     already behind now. Picked over not finishing a back-filled block that's last in its queue,
     which would have fixed the back-fill case only.
+35. **TODOs.** *Ask (2026-10-25):* a way to put down what has to be finished today: right-click
+    an empty spot in the future → *Add TODO* places a small bubble there to type into, and a
+    block can be linked to one TODO of the day, whatever its label; the bubbles in bright,
+    visible colours. Each TODO is a comic bubble filled with the next colour of its own loud
+    ring (`TODO_PALETTE`: highlighter yellow, magenta, cyan, neon green, orange), its tail's tip
+    on the spot. A linked block is joined to its TODO by a cord in that colour, so it's clear
+    which block serves which TODO without matching names. *Feedback (same day):* the cord was
+    too thick and didn't need its ink edges; it's now a thin dashed curve in the TODO's colour. A tick box was added so a TODO can be
+    finished — it isn't ticked by its blocks, since a block ending doesn't say the thing is done.
 
 ## Current behaviour
 
@@ -340,6 +349,17 @@ Each round was built, installed and tried in the menu bar panel.
   bed!* puts that bubble at the clicked minute (or moves the day's one there). The bubble sits
   just right of the axis with its tail on the time and shows the time; drag it up or down,
   1:1, to the exact minute. Right-click it → *Remove*.
+- **TODOs:** right-click a blank spot ahead of now (not in the grey past; anywhere on a future
+  day) → *Add TODO* puts a small speech bubble there, its tail's tip on the spot, and opens it
+  for typing; Enter or a click elsewhere keeps the text, Escape goes back, and one left empty
+  goes away. Each takes the next colour in `TODO_PALETTE`, black text on all of them. Click it
+  to edit, click its box to tick it off (struck through), drag it anywhere 1:1; right-click
+  it → *Edit*, *Done* / *Not done yet*, *Remove*. A block's right-click menu lists the day's
+  TODOs under "Working on": picking one links the block to it (picking it again unlinks it), and
+  a thin dashed curve in the TODO's colour runs from the block's nearest edge (leaving square to
+  it) up into the tail's tip. One TODO can
+  have several blocks; a block has at most one. The block's label doesn't have to match.
+  Hovering a linked block adds "for “…”". Removing a TODO unlinks its blocks.
 
 - **Thin, free blocks:** a block is 34 px wide (about a tenth of the panel), or a whole
   multiple of that — right-click → *Width 1× 2× 3× 4×*; wider means the task takes more of
@@ -439,16 +459,20 @@ Each round was built, installed and tried in the menu bar panel.
 ## The model
 
 ```
-block   { id, task, x, span, start, plan (min), created, end, color, label, note, bubbleY }
+block   { id, task, x, span, start, plan (min), created, end, color, label, note, bubbleY, todo }
                                      end is set only by Done; x is the left edge in the
                                      lane, whole px; span the width in BLOCK_Ws (1–4;
                                      missing = 1); color indexes PALETTE; label is a label id
                                      (or null), note a small free note, bubbleY where the
                                      badge was dragged to (px from the block's top, or
                                      null); task is a typed name from before labels, kept
-                                     in the data but no longer shown
+                                     in the data but no longer shown; todo is the id of
+                                     a TODO of the same day, or null
+todo    { id, x, at, text, color, done }   the tail's tip at x px in the lane and time
+                                     `at`; color indexes TODO_PALETTE; a TODO with no text
+                                     is never written
 switch  { id, blocks: [block ids], from, to }      to is null while the group is on
-day     { date, blocks, switches, wake, sleep }  wake/sleep: when she got out of bed and
+day     { date, blocks, switches, todos, wake, sleep }  wake/sleep: when she got out of bed and
                                      went to bed that day, ms, or null
 label   { id, name, archived }       global, not per day — in the "labels" record; archived
                                      labels are off the menu's list but kept for the blocks
@@ -477,11 +501,12 @@ label   { id, name, archived }       global, not per day — in the "labels" rec
 ## Storage
 
 Each change writes the whole day, `{ date, blocks: [{ id, task, x, span, start, plan, created,
-end, color, label, note, bubbleY }], switches: [{ id, blocks, from, to }], wake, sleep,
-updatedAt }`, as one
+end, color, label, note, bubbleY, todo }], switches: [{ id, blocks, from, to }], todos: [{ id,
+x, at, text, color, done }], wake, sleep, updatedAt }`, as one
 record in an append-only log. It's written after a placed block's die lands, pulling an edge,
 moving the start edge, moving a block sideways, labeling, editing a note, sliding a badge to a
-new place, changing a block's width, placing, dragging or removing a wake/sleep mark, *Done*, *Remove*, forming or
+new place, changing a block's width, placing, dragging or removing a wake/sleep mark, adding, editing, ticking, dragging or
+removing a TODO, linking a block to one, *Done*, *Remove*, forming or
 dissolving a switching group, and when a block's end is first determined (the next block in its
 queue began), so the log keeps those outcomes rather than re-deriving them. The labels live in
 their own record, `{ date: "labels", labels: [{ id, name, archived }], updatedAt }` — keyed "labels" where
@@ -521,5 +546,7 @@ The die's own numbers (size, camera, lamp, gravity) are the Roll app's, unchange
   weights. Is "mostly task A, glancing at B" worth modelling?
 - **Real context switches.** The slices are synthetic. Logging actual switches (a tap on the
   block I'm turning to) would make the fill a true scheduler trace — and a heavier interaction.
+- **TODOs and their blocks.** Ticking a TODO is by hand. Should finishing its last linked
+  block offer to tick it? And should an unticked TODO carry over to the next day?
 - **Stretching interactions.** These are the eventual reason for the name and haven't been
   designed yet.

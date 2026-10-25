@@ -28,13 +28,17 @@
 // Getting up and going to bed: right-click a blank spot for "Got out of bed!" or "Going to bed!",
 // a small bubble pointing at the axis at that time. Drag it up or down to the exact minute.
 //
+// TODOs: right-click a blank spot ahead of now for "Add TODO", a small bubble in a loud colour
+// whose tail points at that spot, and type what to finish. A block can be linked to one TODO of
+// its day from its right-click menu, whatever its label; a line in the TODO's colour joins them.
+//
 // Storage: each change writes the whole day, blocks and switching groups, as one record through
 // the bridge to an append-only log in Rust (`stretch.log`; see docs/storage.md). The page keeps
 // no other copy.
 import { dayKeyAt, dayBounds, monthCells } from "./day.ts";
 import { focusedMs } from "./switching.ts";
 import { rollDie, cancelRoll, dieBusy } from "./dice.js";   // hand-kept JS; types in dice.d.ts
-import type { BlockRecord, DayRecord, Label, LabelsRecord, StoredDay, StoredLabels, SwitchGroup } from "./types.ts";
+import type { BlockRecord, DayRecord, Label, LabelsRecord, StoredDay, StoredLabels, SwitchGroup, TodoRecord } from "./types.ts";
 
 type State = "ahead" | "running" | "done";
 type MarkKind = "wake" | "sleep";
@@ -79,6 +83,7 @@ interface Move {
 }
 interface Drag { b: Block; pointer: number; x0: number; at: number; dx: number; }
 interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
+interface Todo extends TodoRecord { el?: HTMLDivElement; }   // el: set by mountTodo
 
 (function(){
   "use strict";
@@ -134,6 +139,7 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
   // Marks: when she got out of bed and went to bed that day, ms or null.
   var blocks: Block[] = [], switches: SwitchGroup[] = [];
   var marks: Record<MarkKind, number | null> = { wake: null, sleep: null };
+  var todos: Todo[] = [];
   var labels: Label[] = [], nextLabelId = 1;
   var dayKey = "", dayStart = 0, dayEnd = 0;   // set by buildDay
   var following = true;   // showing today, so the view moves on when the day rolls over
@@ -234,6 +240,7 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
     });
     rebuildBalls();
     rebuildTies();
+    rebuildLinks();
   }
 
   /* ---------- aligned blocks: one label, one x, tied by a dashed line ---------- */
@@ -520,6 +527,7 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
       axis.appendChild(label);
     }
     closeAllBubbles();
+    todos.forEach(function(t){ if (t.el) t.el.remove(); });
     // Show this day as saved (a new day starts empty). A day written before free placement has
     // a slot index, or before that a `track` id and a tracks array, whose left-to-right order
     // maps to a column; either way old columns spread out from the left.
@@ -542,14 +550,19 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
                plan: b.plan, created: b.created, end: b.end == null ? null : b.end,
                color: (b.color == null ? b.id - 1 : b.color) % PALETTE.length,
                label: b.label == null ? null : b.label, note: b.note || "",
-               bubbleY: b.bubbleY == null ? null : b.bubbleY };
+               bubbleY: b.bubbleY == null ? null : b.bubbleY, todo: b.todo == null ? null : b.todo };
+    });
+    todos = (doc.todos || []).map(function(t){
+      return { id: t.id, x: t.x, at: t.at, text: t.text || "", color: (t.color || 0) % TODO_PALETTE.length,
+               done: !!t.done };
     });
     switches = (doc.switches || []).map(function(g){
       return { id: g.id, blocks: g.blocks.slice(), from: g.from, to: g.to == null ? null : g.to };
     });
-    [...blocks, ...switches].forEach(function(o){ nextId = Math.max(nextId, o.id + 1); });
+    [...blocks, ...switches, ...todos].forEach(function(o){ nextId = Math.max(nextId, o.id + 1); });
     marks = { wake: doc.wake == null ? null : doc.wake, sleep: doc.sleep == null ? null : doc.sleep };
     renderMarks();
+    todos.forEach(mountTodo);
     render();
   }
 
@@ -756,6 +769,7 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
     r.shade.style.width = width + "px";
     placeBadge(b);
     placeTiesOf(b);
+    placeLink(b);
     if (r.handle) r.handle.style.top = "0px";   // the top edge is always the planned end
   }
 
@@ -791,7 +805,8 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
     if (pull || press || move || drag || menu) { hideTip(); return; }
     var box = lane.getBoundingClientRect();
     var nm = labelNameOf(b);
-    tip.textContent = (nm ? nm + " · " : "") + infoOf(b, Date.now());
+    var td = todoOf(b);
+    tip.textContent = (nm ? nm + " · " : "") + infoOf(b, Date.now()) + (td ? " · for “" + td.text + "”" : "");
     tip.hidden = false;
     var x = e.clientX - box.left + 14, y = e.clientY - box.top + 16;
     tip.style.left = Math.max(4, Math.min(box.width - tip.offsetWidth - 4, x)) + "px";
@@ -856,6 +871,27 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
     })(n);
     el.append(wrow);
     el.append(button("Remove", "", "Remove this block", function(){ closeMenu(); remove(b); }));
+    // TODOs: what this block works on, one of the day's. The linked one is ticked; picking it
+    // again unlinks it.
+    var named = todos.filter(function(t){ return t.text; });
+    if (named.length) {
+      var tsep = document.createElement("div");
+      tsep.className = "st-menu-sep";
+      var head = document.createElement("div");
+      head.className = "st-menu-head";
+      head.textContent = "Working on";
+      el.append(tsep, head);
+      named.forEach(function(t){
+        var cur = b.todo === t.id;
+        var tb = button((cur ? "✓ " : "") + (t.text.length > 24 ? t.text.slice(0, 23) + "…" : t.text), "todo",
+          cur ? "Unlink it from this TODO" : "Link it to this TODO", function(){
+            closeMenu();
+            linkTodo(b, cur ? null : t.id);
+          });
+        tb.style.setProperty("--st-c", TODO_PALETTE[t.color]);
+        el.append(tb);
+      });
+    }
     // Labels: the block's type. Every label ever added is here to pick from; the current one is
     // ticked, and picking it again takes it off. The input at the bottom adds a new one.
     var sep = document.createElement("div");
@@ -914,6 +950,8 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
     var t = e.target as Node;
     if (menu && !menu.contains(t)) closeMenu();
     if (cal && !cal.contains(t) && !calBtn.contains(t)) closeCal();
+    // the lane's press handler prevents the default, which would otherwise take focus away
+    if (todoInput && t !== todoInput) todoInput.blur();
     // the bubble doesn't close on clicks elsewhere: it stays out until its "−" (or Escape)
   }, true);
 
@@ -1080,17 +1118,262 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
   }
   // Right-click a blank spot: put a mark there.
   lane.addEventListener("contextmenu", function(e){
-    if ((e.target as Element).closest(".st-block, .st-bub-icon, .st-bubble, .st-menu, .st-mark, .st-die")) return;
+    if ((e.target as Element).closest(".st-block, .st-bub-icon, .st-bubble, .st-menu, .st-mark, .st-die, .st-todo")) return;
     e.preventDefault();
     if (pull || move || drag || storageDown) return;
-    var ts = clampMark(tsAt(e.clientY - lane.getBoundingClientRect().top));
+    var box = lane.getBoundingClientRect();
+    var at = tsAt(e.clientY - box.top), ts = clampMark(at), x = e.clientX - box.left;
     var el = newMenu();
+    // only ahead of now: it's something still to do
+    if (at > Date.now()) el.append(button("Add TODO", "", "Something to finish, here",
+      function(){ closeMenu(); addTodo(x, ts); }));
     (Object.keys(MARKS) as MarkKind[]).forEach(function(kind){
       el.append(button(MARKS[kind], "", (marks[kind] == null ? "Mark it at " : "Move it to ") + clock(ts),
         function(){ closeMenu(); setMark(kind, ts); }));
     });
     showMenu(el, e);
   });
+
+  /* ---------- TODOs: things to finish today, and the blocks that work on them ---------- */
+  // Kept in the day record as `todos`. Each is a small speech bubble in a loud colour — the next
+  // in TODO_PALETTE — whose tail's tip sits on the spot it was put, (x, at). Right-click a blank
+  // spot ahead of now to add one; it opens for typing what to do, and one left empty goes away.
+  // Click it to edit, click its box to tick it off, drag it anywhere, right-click it for the
+  // rest. A block links to one TODO of its day (BlockRecord.todo; its label needn't match), and
+  // a dashed curve in the TODO's colour runs from the block's nearest edge to the tail's tip.
+  var TODO_PALETTE = [
+    "255,234,0",    // highlighter yellow
+    "255,46,166",   // magenta
+    "0,229,255",    // cyan
+    "80,255,40",    // neon green
+    "255,128,0"     // orange
+  ];
+  var TODO_TIP = 8;   // px: the tail tip's x from the box's inner edge on the tail's side
+  var todoInput: HTMLInputElement | null = null;   // the TODO being typed into
+  var links: Partial<Record<number, SVGPathElement>> = {};   // the cord from a block to its TODO, by block id
+  // The cords are paths on one SVG over the whole lane, under the blocks.
+  var SVG_NS = "http://www.w3.org/2000/svg" as const;
+  var cords = document.createElementNS(SVG_NS, "svg");
+  cords.classList.add("st-cords");
+  cords.setAttribute("aria-hidden", "true");
+  lane.append(cords);
+  function todoById(id: number){ return todos.find(function(t){ return t.id === id; }); }
+  function todoOf(b: Block){ var t = b.todo == null ? undefined : todoById(b.todo); return t && t.text ? t : undefined; }
+  function clampTodoX(x: number){ return Math.round(Math.max(4, Math.min(lane.clientWidth - 4, x))); }
+  function nextTodoColor(){
+    return todos.length ? (todos[todos.length - 1].color + 1) % TODO_PALETTE.length : 0;
+  }
+
+  function mountTodo(t: Todo){
+    var el = document.createElement("div");
+    el.className = "st-todo";
+    el.innerHTML = '<span class="st-todo-box" title="Tick it off"></span><span class="st-todo-text"></span>' +
+      '<svg class="st-todo-tail" aria-hidden="true"><polyline /></svg>';
+    el.addEventListener("pointerdown", function(e){ todoDown(t, e); });
+    el.addEventListener("contextmenu", function(e){ e.preventDefault(); todoMenu(t, e); });
+    lane.append(el);
+    t.el = el;
+    dressTodo(t);
+  }
+  function dressTodo(t: Todo){
+    var el = t.el!;
+    el.style.setProperty("--st-c", TODO_PALETTE[t.color]);
+    el.classList.toggle("done", t.done);
+    el.querySelector(".st-todo-text")!.textContent = t.text;
+    el.title = "Click to edit · drag to move · right-click for more";
+    placeTodo(t);
+  }
+  // Put the tail's tip on (x, at): the box sits above it, to the right, or to the left (flipped)
+  // near the panel's edge.
+  function placeTodo(t: Todo){
+    var el = t.el!;
+    var flip = t.x - INK - TODO_TIP + el.offsetWidth > lane.clientWidth - 2;
+    var inner = el.clientWidth;   // the padding box, inside the 2-px border
+    var tip = flip ? inner - TODO_TIP : TODO_TIP;
+    el.classList.toggle("flip", flip);
+    el.style.left = (t.x - INK - tip) + "px";
+    el.style.top = (yOf(t.at) - 9 - INK - el.clientHeight) + "px";
+    // in the tail's coordinates: x from the padding box, y = 0 at the bottom border's inner edge
+    el.querySelector("polyline")!.setAttribute("points",
+      (tip - 5) + ",-1 " + tip + ",9 " + (tip + 5) + ",-1");
+    placeLinksTo(t);
+  }
+
+  function addTodo(x: number, at: number){
+    var t: Todo = { id: nextId++, x: clampTodoX(x), at: at, text: "", color: nextTodoColor(), done: false };
+    todos.push(t);
+    mountTodo(t);
+    t.el!.style.transformOrigin = t.el!.classList.contains("flip") ? "100% 100%" : "0 100%";   // it pops out of its tail
+    if (!reduceMotion.matches) t.el!.animate(
+      [{ transform: "scale(.4)", opacity: .2 }, { transform: "none", opacity: 1 }],
+      { duration: 260, easing: "cubic-bezier(.2,.9,.3,1.35)" });
+    editTodo(t);
+  }
+  // Type into it in place. Enter or a click elsewhere keeps the text, Escape goes back; a TODO
+  // that never got any text is taken off again. Clearing an existing one's text keeps the old.
+  function editTodo(t: Todo){
+    var el = t.el!;
+    if (el.classList.contains("editing")) return;
+    var text = el.querySelector(".st-todo-text") as HTMLElement;
+    var input = document.createElement("input");
+    input.className = "st-todo-input";
+    input.maxLength = 80;
+    input.placeholder = "What to finish?";
+    input.spellcheck = false;
+    input.value = t.text;
+    text.hidden = true;
+    el.classList.add("editing");
+    text.after(input);
+    todoInput = input;
+    var over = false;
+    function fit(){
+      input.size = Math.max(14, Math.min(30, input.value.length + 1));
+      placeTodo(t);
+    }
+    function end(keep: boolean){
+      if (over) return;
+      over = true;
+      todoInput = null;
+      var v = input.value.trim();
+      input.remove();
+      text.hidden = false;
+      el.classList.remove("editing");
+      if (keep && v && v !== t.text) {
+        t.text = v;
+        dressTodo(t);
+        rebuildLinks();
+        persist();
+      } else placeTodo(t);
+      if (!t.text) removeTodo(t);   // never given anything to do
+    }
+    input.addEventListener("input", fit);
+    input.addEventListener("pointerdown", function(e){ e.stopPropagation(); });
+    input.addEventListener("keydown", function(e){
+      e.stopPropagation();
+      if (e.key === "Enter") end(true);
+      else if (e.key === "Escape") end(false);
+    });
+    input.addEventListener("blur", function(){ end(true); });
+    fit();
+    input.focus();
+    input.select();
+  }
+  function toggleTodo(t: Todo){
+    t.done = !t.done;
+    dressTodo(t);
+    if (t.done && !reduceMotion.matches) t.el!.animate(
+      [{ transform: "rotate(-4deg) scale(1.08)" }, { transform: "none" }],
+      { duration: 220, easing: "cubic-bezier(.2,.9,.3,1.35)" });
+    persist();
+  }
+  // Blocks that worked on it are unlinked; they stay as they are.
+  function removeTodo(t: Todo){
+    if (todoInput && t.el!.contains(todoInput)) todoInput.blur();
+    t.el!.remove();
+    todos = todos.filter(function(o){ return o !== t; });
+    blocks.forEach(function(b){ if (b.todo === t.id) b.todo = null; });
+    rebuildLinks();
+    if (t.text) persist();
+  }
+  function linkTodo(b: Block, id: number | null){
+    b.todo = id;
+    rebuildLinks();
+    persist();
+  }
+  function todoMenu(t: Todo, e: MouseEvent){
+    var m = newMenu();
+    m.append(button("Edit", "", "Change what to do", function(){ closeMenu(); editTodo(t); }));
+    m.append(button(t.done ? "Not done yet" : "Done", "", t.done ? "Untick it" : "Tick it off",
+      function(){ closeMenu(); toggleTodo(t); }));
+    m.append(button("Remove", "", "Take this TODO off (blocks linked to it are unlinked)",
+      function(){ closeMenu(); removeTodo(t); }));
+    showMenu(m, e);
+  }
+  // Press and drag to move it anywhere, 1:1, a minute at a time; a press that doesn't move is a
+  // click: on its box it ticks it off, anywhere else it opens it for editing.
+  function todoDown(t: Todo, e: PointerEvent){
+    if (e.button !== 0 || (e.target as Element).closest("input")) return;
+    e.stopPropagation();
+    e.preventDefault();
+    hideTip();
+    var el = t.el!;
+    try { el.setPointerCapture(e.pointerId); } catch (_) {}
+    var x0 = e.clientX, y0 = e.clientY, s0 = scroller.scrollTop, tx0 = t.x, at0 = t.at, moved = false;
+    var onBox = !!(e.target as Element).closest(".st-todo-box");
+    function mv(ev: PointerEvent){
+      if (ev.pointerId !== e.pointerId) return;
+      var dx = ev.clientX - x0, dy = ev.clientY - y0 + (scroller.scrollTop - s0);
+      if (!moved && Math.hypot(dx, dy) < 4) return;
+      moved = true;
+      el.classList.add("dragging");
+      t.x = clampTodoX(tx0 + dx);
+      t.at = clampMark(at0 - dy / PX * MIN_MS);   // up is later
+      placeTodo(t);
+    }
+    function up(ev: PointerEvent){
+      if (ev.pointerId !== e.pointerId) return;
+      el.removeEventListener("pointermove", mv);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+      el.classList.remove("dragging");
+      if (todos.indexOf(t) < 0) return;   // the day changed under the drag
+      if (ev.type === "pointercancel") {
+        t.x = tx0;
+        t.at = at0;
+        placeTodo(t);
+        return;
+      }
+      if (!moved) {
+        if (onBox) toggleTodo(t);
+        else editTodo(t);
+        return;
+      }
+      if (t.x !== tx0 || t.at !== at0) persist();
+    }
+    el.addEventListener("pointermove", mv);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  }
+
+  // The cords from blocks to their TODOs, kept across rebuilds like the ties.
+  function rebuildLinks(){
+    var keep = links;
+    links = {};
+    blocks.forEach(function(b){
+      if (!b.el || !todoOf(b)) return;
+      var el = keep[b.id];
+      delete keep[b.id];
+      if (!el) {
+        el = document.createElementNS(SVG_NS, "path");
+        cords.append(el);
+      }
+      links[b.id] = el;
+      placeLink(b);
+    });
+    Object.values(keep).forEach(function(el){ el!.remove(); });
+  }
+  // From the point of the block nearest the tail's tip to the tip, as a curve: it leaves the
+  // block square to the edge it starts on and comes up into the tail from below. The block's box
+  // comes from its inline style — where it's going — like placeBadge.
+  function placeLink(b: Block){
+    var el = links[b.id], t = todoOf(b);
+    if (!el || !t || !b.el) return;
+    var r = b.el.root.style;
+    var l = parseFloat(r.left), w = parseFloat(r.width), top = parseFloat(r.top), h = parseFloat(r.height);
+    var tx = t.x, ty = yOf(t.at);
+    var px = Math.max(l, Math.min(l + w, tx)), py = Math.max(top, Math.min(top + h, ty));
+    var len = Math.hypot(tx - px, ty - py);
+    var k = Math.min(60, len * 0.45);   // how far the curve keeps its starting and ending directions
+    var c1x = px, c1y = py;
+    if (px === l || px === l + w) c1x += (px === l ? -1 : 1) * k;   // off a side edge: sideways
+    else c1y += (py === top ? -1 : 1) * k;                          // off the top or bottom: up or down
+    el.style.display = len < 4 ? "none" : "";
+    el.style.stroke = "rgb(" + TODO_PALETTE[t.color] + ")";
+    el.setAttribute("d", "M" + px + " " + py + " C" + c1x + " " + c1y + " " + tx + " " + (ty + k) + " " + tx + " " + ty);
+  }
+  function placeLinksTo(t: Todo){
+    blocks.forEach(function(b){ if (b.todo === t.id) placeLink(b); });
+  }
 
   /* ---------- the calendar: open another day ---------- */
   // The icon at the top right opens a month. Days with something in them have a dot; today is
@@ -1123,7 +1406,7 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
   }
   function hasDay(key: string){
     var d = saved[key];
-    return !!d && ((d.blocks || []).length > 0 || d.wake != null || d.sleep != null);
+    return !!d && ((d.blocks || []).length > 0 || (d.todos || []).length > 0 || d.wake != null || d.sleep != null);
   }
   function drawCal(){
     var today = dayKeyAt(Date.now());
@@ -1172,10 +1455,13 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
       blocks: blocks.map(function(b){
         return { id: b.id, task: b.task, x: b.x, span: b.span, start: b.start, plan: b.plan,
                  created: b.created, end: b.end, color: b.color, label: b.label, note: b.note,
-                 bubbleY: b.bubbleY };
+                 bubbleY: b.bubbleY, todo: b.todo };
       }),
       switches: switches.map(function(g){
         return { id: g.id, blocks: g.blocks.slice(), from: g.from, to: g.to };
+      }),
+      todos: todos.filter(function(t){ return t.text; }).map(function(t){
+        return { id: t.id, x: t.x, at: t.at, text: t.text, color: t.color, done: t.done };
       }),
       wake: marks.wake,
       sleep: marks.sleep,
@@ -1234,7 +1520,7 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
   // There's no pointer capture during the hold, so a quick double-click still reaches the block.
   lane.addEventListener("pointerdown", function(e){
     if (e.button !== 0 || pull || press || move || drag || storageDown || dieBusy()) return;
-    if ((e.target as Element).closest("button, .st-handle, .st-menu, .st-bubble, .st-die, .st-mark")) return;
+    if ((e.target as Element).closest("button, .st-handle, .st-menu, .st-bubble, .st-die, .st-mark, .st-todo")) return;
     e.preventDefault();
     hideTip();
     var box = lane.getBoundingClientRect();
@@ -1302,7 +1588,7 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
     if (clash) { say("No room for a block here."); return; }
 
     var b: Block = { id: nextId++, task: "", x: x, span: 1, start: start, plan: MIN_PLAN, created: now, end: null,
-              color: nextColor(), label: null, note: "", bubbleY: null };
+              color: nextColor(), label: null, note: "", bubbleY: null, todo: null };
     var room = roomAfter(b);
     if (room < MIN_PLAN) { say("No room for a block here."); return; }
     // Roll for the length: the die bounces on the start line, and the block appears when it
@@ -1644,6 +1930,7 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
     d.b.el!.root.style.left = d.at + "px";
     d.b.el!.shade.style.left = (d.at + SHADE_X) + "px";
     placeBadge(d.b);
+    placeLink(d.b);
   }
   // Whether b, put at `x`, would be clear of every block it overlaps in time.
   function freeAt(x: number, b: Block){

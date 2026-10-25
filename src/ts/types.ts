@@ -16,6 +16,18 @@ export interface BlockRecord {
   label: number | null;   // a Label id
   note: string;
   bubbleY: number | null; // px: where the badge sits below the block's top; null for the default
+  todo: number | null;    // a TodoRecord id on the same day: the TODO this block works on
+}
+
+// Something to finish that day: a small bright bubble whose tail's tip is on a spot in the lane.
+// Blocks point at it by id (BlockRecord.todo). One with no text is never written.
+export interface TodoRecord {
+  id: number;
+  x: number;              // px: the tail's tip, from the lane's left
+  at: number;             // the tail's tip in time, ms
+  text: string;
+  color: number;          // index into the TODO palette
+  done: boolean;
 }
 
 // 2–3 running blocks time-sliced on one core (switching.ts). `to` is null while it's on.
@@ -31,6 +43,7 @@ export interface DayRecord {
   date: string;
   blocks: BlockRecord[];
   switches: SwitchGroup[];
+  todos: TodoRecord[];
   wake: number | null;    // when she got out of bed
   sleep: number | null;   // when she went to bed
   updatedAt: number;
@@ -62,8 +75,9 @@ export interface StoredBlock extends Partial<BlockRecord> {
   slot?: number;
   track?: number;
 }
-export interface StoredDay extends Partial<Omit<DayRecord, "blocks">> {
+export interface StoredDay extends Partial<Omit<DayRecord, "blocks" | "todos">> {
   blocks?: StoredBlock[];
+  todos?: (Partial<TodoRecord> & { id: number; x: number; at: number })[];
   tracks?: { id: number }[];
 }
 export interface StoredLabels {

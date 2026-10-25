@@ -6,9 +6,10 @@ A macOS menu bar app: a day timeline where you press and hold to place a task bl
 as thin columns placed freely left to right (1×–4× the narrowest width, wider for the task taking
 the most attention; alignment goes by centre line) (blocks that overlap in x are one queue, like
 processes on a core; 2–3 running blocks can be marked as "switching" — time-sliced on one core,
-not parallel). Blocks aren't named by typing: they're labeled with task types from a global,
-stored label list, and a labeled block wears a speech-bubble badge that opens to the label and a
-note. Time runs upwards. Bundle identifier `com.ruoqi.stretch`; the page's bridge is
+not parallel). TODOs — bright bubbles placed in the future by right-click — say what's to be
+finished that day, and a block can be linked to one. Blocks aren't named by typing: they're
+labeled with task types from a global, stored label list, and a labeled block wears a
+speech-bubble badge that opens to the label and a note. Time runs upwards. Bundle identifier `com.ruoqi.stretch`; the page's bridge is
 `window.stretch`.
 
 Read before changing things:
@@ -51,12 +52,12 @@ src/                     frontend, served as-is
   index.html             the panel: header (date, Today pill, calendar icon) + timeline (axis,
                          lane, now dot)
   ts/                    the page's source; tsc emits each file to js/ under the same name
-  ts/types.ts            the record schema (DayRecord, BlockRecord, SwitchGroup, LabelsRecord,
-                         what load() can return) and the StretchBridge interface
+  ts/types.ts            the record schema (DayRecord, BlockRecord, SwitchGroup, TodoRecord,
+                         LabelsRecord, what load() can return) and the StretchBridge interface
   ts/stretch.ts          the whole UI: timeline, press-and-hold, the roll, elastic pull, free x
                          placement, sideways drag, colours, hover label, right-click menu,
-                         labels and speech bubbles, switching groups, wake/sleep marks, the
-                         calendar (other days), persistence
+                         labels and speech bubbles, switching groups, wake/sleep marks, TODOs,
+                         the calendar (other days), persistence
   js/dice.js             the ray-traced die + its physics, ported verbatim from legacy/roll
                          (see "Legacy"); rollDie/cancelRoll/dieBusy. Stays JS, typed by
                          ts/dice.d.ts

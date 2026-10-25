@@ -245,6 +245,13 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--st-ink);outline
 .st-menu .st-menu-label button.del{flex:0 0 auto;padding:4px 6px;color:var(--st-muted);opacity:0}
 .st-menu-label:hover button.del,.st-menu .st-menu-label button.del:focus-visible{opacity:1}
 .st-menu .st-menu-label button.del:hover{color:var(--st-ink)}
+/* the block's TODOs: a small heading, then each TODO with a swatch of its colour */
+.st-menu-head{padding:1px 10px 0;font-size:10px;font-weight:700;color:var(--st-muted);letter-spacing:.04em;text-transform:uppercase}
+.st-menu button.todo{font-weight:700}
+.st-menu button.todo::before{
+  content:"";display:inline-block;width:9px;height:9px;margin-right:6px;vertical-align:-1px;
+  background:rgb(var(--st-c));border:1.5px solid var(--st-ink);border-radius:2px;
+}
 .st-menu .st-menu-new{
   margin:2px 4px 3px;padding:2px 6px;min-width:0;
   font-family:inherit;font-size:13px;color:var(--st-ink);
@@ -365,3 +372,46 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--st-ink);outline
 .st-mark-tail polyline{
   fill:var(--st-bg);stroke:var(--st-ink);stroke-width:2;stroke-linejoin:miter;stroke-miterlimit:10;
 }
+
+/* TODOs: something to finish today — a small speech bubble in a loud colour (--st-c, from
+   TODO_PALETTE in stretch.js), its tail's tip on the spot it was put. Black text on every
+   colour, in either theme. placeTodo sets left/top and the tail's points; it hangs to the
+   right of the tip, or the left (.flip) near the panel's edge. Its box ticks it off. */
+.st-todo{
+  --st-c:255,234,0;
+  position:absolute;z-index:6;display:flex;align-items:flex-start;gap:5px;max-width:150px;
+  padding:3px 8px 2px 6px;
+  font-size:11px;font-weight:700;line-height:1.35;color:#000;
+  background:rgb(var(--st-c));border:2px solid var(--st-ink);border-radius:8px;
+  box-shadow:2.5px 2.5px 0 var(--st-ink);
+  cursor:grab;touch-action:none;
+}
+.st-todo.dragging{z-index:7;cursor:grabbing}
+.st-todo.editing{max-width:none;cursor:text}
+.st-todo-box{
+  position:relative;flex:0 0 auto;width:11px;height:11px;margin-top:2px;cursor:pointer;
+  background:rgba(255,255,255,.6);border:1.5px solid #000;border-radius:2px;
+}
+.st-todo.done .st-todo-box::after{   /* the tick */
+  content:"";position:absolute;left:2.5px;top:-1px;width:3px;height:6px;
+  border:solid #000;border-width:0 2px 2px 0;transform:rotate(45deg);
+}
+.st-todo-text{min-width:0;overflow-wrap:anywhere}
+.st-todo.done .st-todo-text{text-decoration:line-through;text-decoration-thickness:2px}
+.st-todo-input{
+  min-width:0;padding:0;font:inherit;color:#000;
+  background:transparent;border:0;border-bottom:1px dashed rgba(0,0,0,.55);
+}
+.st-todo-input:focus,.st-todo-input:focus-visible{outline:none;border-bottom:1px solid #000}
+.st-todo-input::placeholder{color:rgba(0,0,0,.5)}
+/* the tail, like the badge's: filled over the bottom border so it opens into the box */
+.st-todo-tail{
+  position:absolute;left:0;top:100%;width:1px;height:1px;overflow:visible;pointer-events:none;
+}
+.st-todo-tail polyline{
+  fill:rgb(var(--st-c));stroke:var(--st-ink);stroke-width:2;stroke-linejoin:miter;stroke-miterlimit:10;
+}
+/* a block linked to a TODO: a thin dashed curve in the TODO's colour (set inline), from the
+   block's nearest edge up into the tail's tip; one SVG over the lane, under the blocks */
+.st-cords{position:absolute;left:0;top:0;width:100%;height:100%;z-index:1;overflow:visible;pointer-events:none}
+.st-cords path{fill:none;stroke-width:2;stroke-dasharray:5 4;stroke-linecap:round}
