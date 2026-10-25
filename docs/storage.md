@@ -24,7 +24,7 @@ how, and the trade-offs behind each choice.
 
 ## Files
 
-Data directory: `~/Library/Application Support/com.ruoqi.stretch/` (Tauri's `app_data_dir`).
+Data directory: Tauri's `app_data_dir`, local storage on the user's machine.
 The store has a name, `stretch`, and its files derive from it:
 
 ```
@@ -286,4 +286,4 @@ correctness. They are kept (two of them) as a cheap audit trail for diagnosing d
 
 The format was first written for the Roll app this project started as, whose `days.log` held
 whole-day images of a block log. Stretch reuses the same code under its own name. The Roll
-data stays in the old data directory (`com.ruoqi.switchcard/`) and isn't read by Stretch.
+data stays in the Roll app's own data directory and isn't read by Stretch.

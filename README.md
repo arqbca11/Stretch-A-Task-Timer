@@ -99,9 +99,8 @@ runs from the block to the bubble. Several blocks can work on one TODO.
 
 ## Storage
 
-Everything is saved locally in
-`~/Library/Application Support/com.ruoqi.stretch/`. Nothing goes over the network, and there is
-no database library.
+Everything is saved in local storage on the user's machine, in the app's data directory.
+Nothing goes over the network, and there is no database library.
 
 ```
 stretch.log          append-only log, one whole-day image per line

@@ -113,7 +113,7 @@ Look and interaction are documented in `docs/interaction.md`; keep it current wh
 
 ## Storage
 
-Data directory: `app_data_dir()` = `~/Library/Application Support/com.ruoqi.stretch/`.
+Data directory: Tauri's `app_data_dir()`, local storage on the user's machine.
 
 ```
 stretch.log          append-only, one JSON record per line: {"day":{..},"op":"day.put","seq":N,"ts":..}
@@ -164,8 +164,8 @@ export; `legacy/roll/README.md` maps it, including line ranges for the die.
   reused, copy the code into `src/`, not the data.
 - `legacy/roll/CLAUDE.roll.md` is the old instructions file; it describes the Roll app, not this
   one.
-- The Roll history itself stays in `~/Library/Application Support/com.ruoqi.switchcard/`
-  (`days.log`, `days.snapshot`, `game.json`). Stretch doesn't read or write it.
+- The Roll history itself stays in the Roll app's own local data directory (`days.log`,
+  `days.snapshot`, `game.json`). Stretch doesn't read or write it.
 
 ## Commands
 
