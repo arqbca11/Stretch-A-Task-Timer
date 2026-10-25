@@ -212,12 +212,12 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
   }
   // The longest plan that fits before the next block in its queue (or the end of the day). A
   // block that has begun can be stretched to now and up to MAX_PLAN beyond it, so coming back
-  // late never leaves the block out of reach. A finished block can be stretched up to now, not
-  // past it: it's a record of something done, however long it took.
+  // late never leaves the block out of reach. That holds for a finished block too: pulled past
+  // now, it's still going after all (endPull reopens it). One ended by the next block in its
+  // queue can't get there, since that block began before now.
   function roomAfter(b: Block){
     var now = Date.now();
-    var cap = b.end != null ? minsBetween(b.start, now)
-      : b.start <= now ? minsBetween(b.start, now) + MAX_PLAN : MAX_PLAN;
+    var cap = b.start <= now ? minsBetween(b.start, now) + MAX_PLAN : MAX_PLAN;
     var n = nextAfter(b);
     return Math.min(cap, minsBetween(b.start, n ? n.start : dayEnd));
   }
@@ -725,7 +725,9 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
     if (planPx == null) planPx = b.plan * PX;
     var height: number, solid: number;
     if (b.state === "done") {
+      // mid-pull it can reach past now, where it would be running again: solid only up to now
       height = solid = live ? planPx : Math.max(3, (endOf(b, now)! - b.start) / MIN_MS * PX);
+      if (live) solid = Math.min(height, Math.max(0, (now - b.start) / MIN_MS * PX));
     } else if (b.state === "running") {
       height = planPx;
       solid = Math.min(height, Math.max(0, (now - b.start) / MIN_MS * PX));   // the fill stops at the planned end
@@ -1551,9 +1553,16 @@ interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
     mark(b, "pulling", false);
     b.inset = 0;
     b.plan = cancel ? p.plan0 : snapPlan(p.want, p.max);
-    if (p.end0 != null) b.end = cancel ? p.end0 : b.start + b.plan * MIN_MS;
+    // A finished block's end moves with its top edge; pulled past now, it isn't finished after
+    // all, and runs again.
+    var reopened = false;
+    if (p.end0 != null) {
+      b.end = cancel ? p.end0 : b.start + b.plan * MIN_MS;
+      if (b.end > Date.now()) { b.end = null; reopened = true; }
+    }
     settle(b, p.edge, b.plan * PX, p.v);
-    relayout(Date.now());   // a longer block can run alongside more of the others
+    if (reopened) render();   // it's running now: remount it in that state
+    else relayout(Date.now());   // a longer block can run alongside more of the others
     persist();              // a new block is saved once it's placed
   }
 

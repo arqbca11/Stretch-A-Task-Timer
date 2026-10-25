@@ -316,6 +316,15 @@ Each round was built, installed and tried in the menu bar panel.
     gap 0 a pushed block lands flush, flush still counted as touching, and a touch needing no
     move was taken for "can't get clear". A touch already at the knock distance isn't a hit now;
     only a real overlap that outward motion can't clear refuses.
+34. **Finished blocks reopen past now.** *Feedback (2026-10-23):* a violet block couldn't be
+    stretched beyond the current time. The log showed it was back-filled at 17:31 from 15:45;
+    the roll (85) ended it at 17:10, behind now, so it was finished on landing (round 31) and
+    could only stretch up to now. But she was still on that task. Now pulling a finished block
+    past now reopens it: `end` goes back to null, so it's running, and the pull gets the room a
+    running block has (`MAX_PLAN` beyond now). This also undoes a Done pressed too early. A
+    block ended because the next block in its queue began stays capped by that block, which is
+    already behind now. Picked over not finishing a back-filled block that's last in its queue,
+    which would have fixed the back-fill case only.
 
 ## Current behaviour
 
@@ -388,9 +397,12 @@ Each round was built, installed and tried in the menu bar panel.
   and it can't go into the previous block in its slot.
 - **Finished blocks** keep both edges, so a block logged after the fact (or ended by Done or
   the next block) can be fixed up: the top edge moves its end — from where it actually ended,
-  up to now and the next block in its queue — and the bottom edge its start, any length.
+  up to the next block in its queue — and the bottom edge its start, any length. Pulled past
+  now, it isn't finished after all: its `end` is cleared and it runs again, with the running
+  block's room (up to `MAX_PLAN` beyond now). Mid-pull it's solid only up to now. A block
+  ended by the next one in its queue can't get past now, since that block began before now.
 - **Colour:** each block gets the next colour after the last block placed (`PALETTE` in
-  `stretch.js`). Black text reads on all of them.
+  `stretch.ts`). Black text reads on all of them.
 - **Fill:** the spent part is solid colour, from the bottom up, and the rest is translucent. The fill grows every 5 s
   with a 1 s ease. A block not yet started is all translucent. The fill (and the block) stops at
   the planned end: a block past its plan sits fully solid, still running, until Done or the next
