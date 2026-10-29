@@ -1389,8 +1389,9 @@ interface Sticker extends StickerRecord { el?: HTMLDivElement; }   // el: set by
   }
 
   /* ---------- stickers: what got done, or went well ---------- */
-  // Kept in the day record as `stickers`. A die-cut sticker — a white edge round a cream face,
-  // inked and with the blocks' halftone shadow, stuck on a little askew — holding a short list,
+  // Kept in the day record as `stickers`. A small square piece of paper — a white edge round a
+  // cream face, inked, a dog-eared corner, the blocks' halftone shadow, stuck on a little askew —
+  // holding a short list,
   // a ★ for each line. Right-click a blank spot (any time: a win is usually behind now) to stick
   // one there, its left edge at the spot (or pulled in to fit) and its middle at the time; it
   // opens for typing, a line per win, and one left empty goes away. Click it to edit, drag it
@@ -1403,7 +1404,8 @@ interface Sticker extends StickerRecord { el?: HTMLDivElement; }   // el: set by
   function mountSticker(k: Sticker){
     var el = document.createElement("div");
     el.className = "st-sticker";
-    el.innerHTML = '<div class="st-sticker-shade"></div><div class="st-sticker-card"><ul></ul></div>';
+    el.innerHTML = '<div class="st-sticker-shade"></div><div class="st-sticker-card"><ul></ul></div>' +
+      '<svg class="st-sticker-fold" viewBox="0 0 12 12" aria-hidden="true"><polygon points="0,12 12,0 0,0" /></svg>';
     el.style.setProperty("--st-tilt", STICKER_TILT[k.id % STICKER_TILT.length] + "deg");
     el.title = "Click to edit · drag to move · right-click for more";
     el.addEventListener("pointerdown", function(e){ stickerDown(k, e); });

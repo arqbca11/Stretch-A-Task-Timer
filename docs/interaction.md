@@ -342,6 +342,9 @@ Each round was built, installed and tried in the menu bar panel.
     comes from its id (so it isn't stored); a gold ★ starts each line. Unlike a TODO it can go
     anywhere in the day, past included, since a win is usually logged after it happens, and it
     has no tail: its left edge sits at the spot (pulled in to fit) and its middle at the time.
+    *Feedback (same day):* no texture for now, but no rounded corners either — a small piece of
+    paper — with a corner slightly folded up. The card is square-cornered with its bottom-right
+    corner clipped off and a dog-ear flap (a shade darker, inked) drawn over the cut.
 
 ## Current behaviour
 
