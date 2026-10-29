@@ -30,6 +30,15 @@ export interface TodoRecord {
   done: boolean;
 }
 
+// What got done or went well that day — "got an interview invite": a die-cut sticker stuck on a
+// spot in the lane, holding a short list. One with no lines is never written.
+export interface StickerRecord {
+  id: number;
+  x: number;              // px: where it was stuck, from the lane's left (its left edge, room allowing)
+  at: number;             // ms: the time it's stuck at (its vertical centre)
+  lines: string[];        // the wins, one per line
+}
+
 // 2–3 running blocks time-sliced on one core (switching.ts). `to` is null while it's on.
 export interface SwitchGroup {
   id: number;
@@ -44,6 +53,7 @@ export interface DayRecord {
   blocks: BlockRecord[];
   switches: SwitchGroup[];
   todos: TodoRecord[];
+  stickers: StickerRecord[];
   wake: number | null;    // when she got out of bed
   sleep: number | null;   // when she went to bed
   updatedAt: number;
@@ -75,9 +85,10 @@ export interface StoredBlock extends Partial<BlockRecord> {
   slot?: number;
   track?: number;
 }
-export interface StoredDay extends Partial<Omit<DayRecord, "blocks" | "todos">> {
+export interface StoredDay extends Partial<Omit<DayRecord, "blocks" | "todos" | "stickers">> {
   blocks?: StoredBlock[];
   todos?: (Partial<TodoRecord> & { id: number; x: number; at: number })[];
+  stickers?: (Partial<StickerRecord> & { id: number; x: number; at: number })[];
   tracks?: { id: number }[];
 }
 export interface StoredLabels {

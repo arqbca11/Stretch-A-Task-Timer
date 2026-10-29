@@ -334,6 +334,14 @@ Each round was built, installed and tried in the menu bar panel.
     which block serves which TODO without matching names. *Feedback (same day):* the cord was
     too thick and didn't need its ink edges; it's now a thin dashed curve in the TODO's colour. A tick box was added so a TODO can be
     finished — it isn't ticked by its blocks, since a block ending doesn't say the thing is done.
+36. **Stickers.** *Ask (2026-10-28):* right-click to add a sticker, like a reminder but for
+    listing what got done or what progress was made that day — "got an interview invite". Her
+    picks among the options: pinned at a time (not one per day in a corner), a short list per
+    sticker (not one win each), and a die-cut look. A sticker is a cream card with a white
+    die-cut edge inside the ink outline, the blocks' halftone shadow, and a slight tilt that
+    comes from its id (so it isn't stored); a gold ★ starts each line. Unlike a TODO it can go
+    anywhere in the day, past included, since a win is usually logged after it happens, and it
+    has no tail: its left edge sits at the spot (pulled in to fit) and its middle at the time.
 
 ## Current behaviour
 
@@ -360,6 +368,12 @@ Each round was built, installed and tried in the menu bar panel.
   it) up into the tail's tip. One TODO can
   have several blocks; a block has at most one. The block's label doesn't have to match.
   Hovering a linked block adds "for “…”". Removing a TODO unlinks its blocks.
+- **Stickers:** right-click a blank spot, past or ahead → *Add sticker* slaps a die-cut sticker
+  there (left edge at the spot, middle at the time) and opens it for typing what got done or
+  went well, a line per win: Enter starts a new line, ⌘Enter or a click elsewhere keeps it,
+  Escape goes back, and blank lines are dropped (at most 8 lines). One left empty goes away.
+  Each line wears a gold ★. Click it to edit, drag it anywhere 1:1; right-click it → *Edit*,
+  *Remove*.
 
 - **Thin, free blocks:** a block is 34 px wide (about a tenth of the panel), or a whole
   multiple of that — right-click → *Width 1× 2× 3× 4×*; wider means the task takes more of
@@ -471,8 +485,11 @@ block   { id, task, x, span, start, plan (min), created, end, color, label, note
 todo    { id, x, at, text, color, done }   the tail's tip at x px in the lane and time
                                      `at`; color indexes TODO_PALETTE; a TODO with no text
                                      is never written
+sticker { id, x, at, lines }         left edge at x px (pulled in to fit), middle at time
+                                     `at`; lines are the wins; one with no lines is never
+                                     written; the tilt comes from the id
 switch  { id, blocks: [block ids], from, to }      to is null while the group is on
-day     { date, blocks, switches, todos, wake, sleep }  wake/sleep: when she got out of bed and
+day     { date, blocks, switches, todos, stickers, wake, sleep }  wake/sleep: when she got out of bed and
                                      went to bed that day, ms, or null
 label   { id, name, archived }       global, not per day — in the "labels" record; archived
                                      labels are off the menu's list but kept for the blocks
@@ -502,11 +519,11 @@ label   { id, name, archived }       global, not per day — in the "labels" rec
 
 Each change writes the whole day, `{ date, blocks: [{ id, task, x, span, start, plan, created,
 end, color, label, note, bubbleY, todo }], switches: [{ id, blocks, from, to }], todos: [{ id,
-x, at, text, color, done }], wake, sleep, updatedAt }`, as one
+x, at, text, color, done }], stickers: [{ id, x, at, lines }], wake, sleep, updatedAt }`, as one
 record in an append-only log. It's written after a placed block's die lands, pulling an edge,
 moving the start edge, moving a block sideways, labeling, editing a note, sliding a badge to a
 new place, changing a block's width, placing, dragging or removing a wake/sleep mark, adding, editing, ticking, dragging or
-removing a TODO, linking a block to one, *Done*, *Remove*, forming or
+removing a TODO, linking a block to one, adding, editing, dragging or removing a sticker, *Done*, *Remove*, forming or
 dissolving a switching group, and when a block's end is first determined (the next block in its
 queue began), so the log keeps those outcomes rather than re-deriving them. The labels live in
 their own record, `{ date: "labels", labels: [{ id, name, archived }], updatedAt }` — keyed "labels" where

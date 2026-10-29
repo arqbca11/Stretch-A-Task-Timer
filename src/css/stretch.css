@@ -415,3 +415,44 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--st-ink);outline
    block's nearest edge up into the tail's tip; one SVG over the lane, under the blocks */
 .st-cords{position:absolute;left:0;top:0;width:100%;height:100%;z-index:1;overflow:visible;pointer-events:none}
 .st-cords path{fill:none;stroke-width:2;stroke-dasharray:5 4;stroke-linecap:round}
+
+/* stickers: what got done or went well — a die-cut sticker: a white edge round a cream face,
+   inked like the blocks, stuck on a little askew (--st-tilt, set from the id in stretch.js),
+   with the blocks' halftone shadow. Fixed colours with black text, in either theme, like the
+   TODOs. placeSticker sets left/top. The shadow is a sibling under the card, not a ::before,
+   so it can't print over the card inside the rotated stacking context. */
+.st-sticker{
+  --st-tilt:0deg;
+  position:absolute;z-index:6;min-width:96px;max-width:168px;
+  transform:rotate(var(--st-tilt));transform-origin:50% 50%;
+  cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;
+}
+.st-sticker.dragging{z-index:7;cursor:grabbing}
+.st-sticker.dragging .st-sticker-card{transform:scale(1.04)}
+.st-sticker.editing{max-width:190px;cursor:text}
+.st-sticker-shade{
+  position:absolute;inset:0;transform:translate(5px,4px);border-radius:11px;pointer-events:none;
+  background:var(--st-ink);
+  -webkit-mask-image:url("../img/halftone.svg");mask-image:url("../img/halftone.svg");
+  -webkit-mask-size:5px 5px;mask-size:5px 5px;
+}
+.st-sticker-card{
+  position:relative;padding:5px 9px 4px 7px;
+  font-size:11px;font-weight:700;line-height:1.35;color:#000;
+  background:#FFF6D6;border:2px solid var(--st-ink);border-radius:11px;
+  box-shadow:inset 0 0 0 3px #FFFFFF;   /* the die-cut white edge, inside the ink */
+  transition:transform .12s;
+}
+.st-sticker ul{margin:0;padding:0;list-style:none}
+.st-sticker li{position:relative;padding-left:14px;overflow-wrap:anywhere}
+.st-sticker li+li{margin-top:2px}
+.st-sticker li::before{   /* a gold star per win */
+  content:"★";position:absolute;left:0;top:-1px;font-size:12px;color:#FFB300;
+  -webkit-text-stroke:.8px #000;
+}
+.st-sticker-input{
+  display:block;width:160px;min-height:2.7em;padding:0;resize:none;overflow:hidden;
+  font:inherit;color:#000;background:transparent;border:0;border-bottom:1px dashed rgba(0,0,0,.55);
+}
+.st-sticker-input:focus,.st-sticker-input:focus-visible{outline:none;border-bottom:1px solid #000}
+.st-sticker-input::placeholder{color:rgba(0,0,0,.5)}

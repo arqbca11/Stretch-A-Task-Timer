@@ -32,13 +32,16 @@
 // whose tail points at that spot, and type what to finish. A block can be linked to one TODO of
 // its day from its right-click menu, whatever its label; a line in the TODO's colour joins them.
 //
+// Stickers: right-click a blank spot, past or ahead, for "Add sticker" — a die-cut sticker stuck
+// there, a short list of what got done or went well ("got an interview invite"), one per line.
+//
 // Storage: each change writes the whole day, blocks and switching groups, as one record through
 // the bridge to an append-only log in Rust (`stretch.log`; see docs/storage.md). The page keeps
 // no other copy.
 import { dayKeyAt, dayBounds, monthCells } from "./day.ts";
 import { focusedMs } from "./switching.ts";
 import { rollDie, cancelRoll, dieBusy } from "./dice.js";   // hand-kept JS; types in dice.d.ts
-import type { BlockRecord, DayRecord, Label, LabelsRecord, StoredDay, StoredLabels, SwitchGroup, TodoRecord } from "./types.ts";
+import type { BlockRecord, DayRecord, Label, LabelsRecord, StoredDay, StickerRecord, StoredLabels, SwitchGroup, TodoRecord } from "./types.ts";
 
 type State = "ahead" | "running" | "done";
 type MarkKind = "wake" | "sleep";
@@ -84,6 +87,7 @@ interface Move {
 interface Drag { b: Block; pointer: number; x0: number; at: number; dx: number; }
 interface Bubble { el: HTMLDivElement; b: Block; save: () => void; }
 interface Todo extends TodoRecord { el?: HTMLDivElement; }   // el: set by mountTodo
+interface Sticker extends StickerRecord { el?: HTMLDivElement; }   // el: set by mountSticker
 
 (function(){
   "use strict";
@@ -140,6 +144,7 @@ interface Todo extends TodoRecord { el?: HTMLDivElement; }   // el: set by mount
   var blocks: Block[] = [], switches: SwitchGroup[] = [];
   var marks: Record<MarkKind, number | null> = { wake: null, sleep: null };
   var todos: Todo[] = [];
+  var stickers: Sticker[] = [];
   var labels: Label[] = [], nextLabelId = 1;
   var dayKey = "", dayStart = 0, dayEnd = 0;   // set by buildDay
   var following = true;   // showing today, so the view moves on when the day rolls over
@@ -528,6 +533,7 @@ interface Todo extends TodoRecord { el?: HTMLDivElement; }   // el: set by mount
     }
     closeAllBubbles();
     todos.forEach(function(t){ if (t.el) t.el.remove(); });
+    stickers.forEach(function(k){ if (k.el) k.el.remove(); });
     // Show this day as saved (a new day starts empty). A day written before free placement has
     // a slot index, or before that a `track` id and a tracks array, whose left-to-right order
     // maps to a column; either way old columns spread out from the left.
@@ -556,13 +562,17 @@ interface Todo extends TodoRecord { el?: HTMLDivElement; }   // el: set by mount
       return { id: t.id, x: t.x, at: t.at, text: t.text || "", color: (t.color || 0) % TODO_PALETTE.length,
                done: !!t.done };
     });
+    stickers = (doc.stickers || []).map(function(k){
+      return { id: k.id, x: k.x, at: k.at, lines: (k.lines || []).slice() };
+    });
     switches = (doc.switches || []).map(function(g){
       return { id: g.id, blocks: g.blocks.slice(), from: g.from, to: g.to == null ? null : g.to };
     });
-    [...blocks, ...switches, ...todos].forEach(function(o){ nextId = Math.max(nextId, o.id + 1); });
+    [...blocks, ...switches, ...todos, ...stickers].forEach(function(o){ nextId = Math.max(nextId, o.id + 1); });
     marks = { wake: doc.wake == null ? null : doc.wake, sleep: doc.sleep == null ? null : doc.sleep };
     renderMarks();
     todos.forEach(mountTodo);
+    stickers.forEach(mountSticker);
     render();
   }
 
@@ -952,6 +962,7 @@ interface Todo extends TodoRecord { el?: HTMLDivElement; }   // el: set by mount
     if (cal && !cal.contains(t) && !calBtn.contains(t)) closeCal();
     // the lane's press handler prevents the default, which would otherwise take focus away
     if (todoInput && t !== todoInput) todoInput.blur();
+    if (stickerInput && t !== stickerInput) stickerInput.blur();
     // the bubble doesn't close on clicks elsewhere: it stays out until its "−" (or Escape)
   }, true);
 
@@ -1118,7 +1129,7 @@ interface Todo extends TodoRecord { el?: HTMLDivElement; }   // el: set by mount
   }
   // Right-click a blank spot: put a mark there.
   lane.addEventListener("contextmenu", function(e){
-    if ((e.target as Element).closest(".st-block, .st-bub-icon, .st-bubble, .st-menu, .st-mark, .st-die, .st-todo")) return;
+    if ((e.target as Element).closest(".st-block, .st-bub-icon, .st-bubble, .st-menu, .st-mark, .st-die, .st-todo, .st-sticker")) return;
     e.preventDefault();
     if (pull || move || drag || storageDown) return;
     var box = lane.getBoundingClientRect();
@@ -1127,6 +1138,8 @@ interface Todo extends TodoRecord { el?: HTMLDivElement; }   // el: set by mount
     // only ahead of now: it's something still to do
     if (at > Date.now()) el.append(button("Add TODO", "", "Something to finish, here",
       function(){ closeMenu(); addTodo(x, ts); }));
+    el.append(button("Add sticker", "", "What got done or went well, at " + clock(ts),
+      function(){ closeMenu(); addSticker(x, ts); }));
     (Object.keys(MARKS) as MarkKind[]).forEach(function(kind){
       el.append(button(MARKS[kind], "", (marks[kind] == null ? "Mark it at " : "Move it to ") + clock(ts),
         function(){ closeMenu(); setMark(kind, ts); }));
@@ -1375,6 +1388,166 @@ interface Todo extends TodoRecord { el?: HTMLDivElement; }   // el: set by mount
     blocks.forEach(function(b){ if (b.todo === t.id) placeLink(b); });
   }
 
+  /* ---------- stickers: what got done, or went well ---------- */
+  // Kept in the day record as `stickers`. A die-cut sticker — a white edge round a cream face,
+  // inked and with the blocks' halftone shadow, stuck on a little askew — holding a short list,
+  // a ★ for each line. Right-click a blank spot (any time: a win is usually behind now) to stick
+  // one there, its left edge at the spot (or pulled in to fit) and its middle at the time; it
+  // opens for typing, a line per win, and one left empty goes away. Click it to edit, drag it
+  // anywhere, right-click it for the rest. The tilt comes from the id, so it's never stored.
+  var STICKER_TILT = [-3, 2, -1.5, 3, -2.5, 1.5];   // degrees
+  var STICKER_LINES = 8, STICKER_CHARS = 400;
+  var stickerInput: HTMLTextAreaElement | null = null;   // the sticker being typed into
+  function clampStickerX(x: number){ return Math.round(Math.max(4, Math.min(lane.clientWidth - 4, x))); }
+
+  function mountSticker(k: Sticker){
+    var el = document.createElement("div");
+    el.className = "st-sticker";
+    el.innerHTML = '<div class="st-sticker-shade"></div><div class="st-sticker-card"><ul></ul></div>';
+    el.style.setProperty("--st-tilt", STICKER_TILT[k.id % STICKER_TILT.length] + "deg");
+    el.title = "Click to edit · drag to move · right-click for more";
+    el.addEventListener("pointerdown", function(e){ stickerDown(k, e); });
+    el.addEventListener("contextmenu", function(e){ e.preventDefault(); stickerMenu(k, e); });
+    lane.append(el);
+    k.el = el;
+    dressSticker(k);
+  }
+  function dressSticker(k: Sticker){
+    var ul = k.el!.querySelector("ul")!;
+    ul.textContent = "";
+    k.lines.forEach(function(line){
+      var li = document.createElement("li");
+      li.textContent = line;
+      ul.append(li);
+    });
+    placeSticker(k);
+  }
+  // Its left edge at x, unless that would run it off the lane's right; its middle at `at`.
+  function placeSticker(k: Sticker){
+    var el = k.el!;
+    el.style.left = Math.max(2, Math.min(k.x, lane.clientWidth - el.offsetWidth - 8)) + "px";
+    el.style.top = (yOf(k.at) - el.offsetHeight / 2) + "px";
+  }
+
+  function addSticker(x: number, at: number){
+    var k: Sticker = { id: nextId++, x: clampStickerX(x), at: at, lines: [] };
+    stickers.push(k);
+    mountSticker(k);
+    editSticker(k);
+    var tilt = STICKER_TILT[k.id % STICKER_TILT.length];
+    if (!reduceMotion.matches) k.el!.animate(   // slapped on
+      [{ transform: "rotate(" + (-3 * tilt) + "deg) scale(1.35)", opacity: .2 },
+       { transform: "rotate(" + tilt + "deg)", opacity: 1 }],
+      { duration: 280, easing: "cubic-bezier(.2,.9,.3,1.35)" });
+  }
+  // Type into it in place, a line per win: Enter starts a new line; ⌘Enter or a click elsewhere
+  // keeps it, Escape goes back. Blank lines are dropped. A sticker that never got a line is
+  // taken off again; clearing an existing one keeps the old lines (Remove takes it off).
+  function editSticker(k: Sticker){
+    var el = k.el!;
+    if (el.classList.contains("editing")) return;
+    var card = el.querySelector(".st-sticker-card")!, ul = card.querySelector("ul")!;
+    var input = document.createElement("textarea");
+    input.className = "st-sticker-input";
+    input.maxLength = STICKER_CHARS;
+    input.placeholder = "What went well?";
+    input.spellcheck = false;
+    input.value = k.lines.join("\n");
+    ul.hidden = true;
+    el.classList.add("editing");
+    card.append(input);
+    stickerInput = input;
+    var over = false;
+    function fit(){
+      var lines = input.value.split("\n");
+      if (lines.length > STICKER_LINES) {   // no more lines than fit on a sticker
+        input.value = lines.slice(0, STICKER_LINES).join("\n");
+      }
+      input.style.height = "auto";
+      input.style.height = input.scrollHeight + "px";
+      placeSticker(k);
+    }
+    function end(keep: boolean){
+      if (over) return;
+      over = true;
+      stickerInput = null;
+      var v = input.value.split("\n").map(function(l){ return l.trim(); }).filter(Boolean);
+      input.remove();
+      ul.hidden = false;
+      el.classList.remove("editing");
+      if (keep && v.length && v.join("\n") !== k.lines.join("\n")) {
+        k.lines = v;
+        dressSticker(k);
+        persist();
+      } else placeSticker(k);
+      if (!k.lines.length) removeSticker(k);   // never given anything
+    }
+    input.addEventListener("input", fit);
+    input.addEventListener("pointerdown", function(e){ e.stopPropagation(); });
+    input.addEventListener("keydown", function(e){
+      e.stopPropagation();
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) end(true);
+      else if (e.key === "Escape") end(false);
+    });
+    input.addEventListener("blur", function(){ end(true); });
+    fit();
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+  function removeSticker(k: Sticker){
+    if (stickerInput && k.el!.contains(stickerInput)) stickerInput.blur();
+    k.el!.remove();
+    stickers = stickers.filter(function(o){ return o !== k; });
+    if (k.lines.length) persist();
+  }
+  function stickerMenu(k: Sticker, e: MouseEvent){
+    var m = newMenu();
+    m.append(button("Edit", "", "Change or add to the list", function(){ closeMenu(); editSticker(k); }));
+    m.append(button("Remove", "", "Peel this sticker off", function(){ closeMenu(); removeSticker(k); }));
+    showMenu(m, e);
+  }
+  // Press and drag to move it anywhere, 1:1, a minute at a time; a press that doesn't move is a
+  // click and opens it for editing.
+  function stickerDown(k: Sticker, e: PointerEvent){
+    if (e.button !== 0 || (e.target as Element).closest("textarea")) return;
+    e.stopPropagation();
+    e.preventDefault();
+    hideTip();
+    var el = k.el!;
+    try { el.setPointerCapture(e.pointerId); } catch (_) {}
+    var x0 = e.clientX, y0 = e.clientY, s0 = scroller.scrollTop, kx0 = k.x, at0 = k.at, moved = false;
+    var left0 = el.offsetLeft;   // drag from where it's drawn, which may be pulled in from k.x
+    function mv(ev: PointerEvent){
+      if (ev.pointerId !== e.pointerId) return;
+      var dx = ev.clientX - x0, dy = ev.clientY - y0 + (scroller.scrollTop - s0);
+      if (!moved && Math.hypot(dx, dy) < 4) return;
+      moved = true;
+      el.classList.add("dragging");
+      k.x = clampStickerX(left0 + dx);
+      k.at = clampMark(at0 - dy / PX * MIN_MS);   // up is later
+      placeSticker(k);
+    }
+    function up(ev: PointerEvent){
+      if (ev.pointerId !== e.pointerId) return;
+      el.removeEventListener("pointermove", mv);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+      el.classList.remove("dragging");
+      if (stickers.indexOf(k) < 0) return;   // the day changed under the drag
+      if (ev.type === "pointercancel") {
+        k.x = kx0;
+        k.at = at0;
+        placeSticker(k);
+        return;
+      }
+      if (!moved) { editSticker(k); return; }
+      if (k.x !== kx0 || k.at !== at0) persist();
+    }
+    el.addEventListener("pointermove", mv);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  }
+
   /* ---------- the calendar: open another day ---------- */
   // The icon at the top right opens a month. Days with something in them have a dot; today is
   // ringed and the day on show is filled. Any day can be opened: a past one to look back (and
@@ -1406,7 +1579,8 @@ interface Todo extends TodoRecord { el?: HTMLDivElement; }   // el: set by mount
   }
   function hasDay(key: string){
     var d = saved[key];
-    return !!d && ((d.blocks || []).length > 0 || (d.todos || []).length > 0 || d.wake != null || d.sleep != null);
+    return !!d && ((d.blocks || []).length > 0 || (d.todos || []).length > 0 ||
+      (d.stickers || []).length > 0 || d.wake != null || d.sleep != null);
   }
   function drawCal(){
     var today = dayKeyAt(Date.now());
@@ -1462,6 +1636,9 @@ interface Todo extends TodoRecord { el?: HTMLDivElement; }   // el: set by mount
       }),
       todos: todos.filter(function(t){ return t.text; }).map(function(t){
         return { id: t.id, x: t.x, at: t.at, text: t.text, color: t.color, done: t.done };
+      }),
+      stickers: stickers.filter(function(k){ return k.lines.length; }).map(function(k){
+        return { id: k.id, x: k.x, at: k.at, lines: k.lines.slice() };
       }),
       wake: marks.wake,
       sleep: marks.sleep,
@@ -1520,7 +1697,7 @@ interface Todo extends TodoRecord { el?: HTMLDivElement; }   // el: set by mount
   // There's no pointer capture during the hold, so a quick double-click still reaches the block.
   lane.addEventListener("pointerdown", function(e){
     if (e.button !== 0 || pull || press || move || drag || storageDown || dieBusy()) return;
-    if ((e.target as Element).closest("button, .st-handle, .st-menu, .st-bubble, .st-die, .st-mark, .st-todo")) return;
+    if ((e.target as Element).closest("button, .st-handle, .st-menu, .st-bubble, .st-die, .st-mark, .st-todo, .st-sticker")) return;
     e.preventDefault();
     hideTip();
     var box = lane.getBoundingClientRect();

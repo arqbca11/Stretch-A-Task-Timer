@@ -4,14 +4,14 @@ A macOS menu bar timeline for working on several things at once. Today is a vert
 time. You **press and hold** to drop a block where you want to start, a die rolls how long it
 runs, and you **pull it like a rubber band** to make it shorter or longer. Blocks sit side by
 side as thin columns, one per thread of work, and bright **TODO** bubbles mark what has to be
-finished today.
+finished today, while die-cut **stickers** collect what got done or went well.
 
 Built with [Tauri 2](https://tauri.app): a Rust backend with its own append-only log storage,
 plain HTML and TypeScript (no framework, no bundler) in a WKWebView, and a menu bar icon that
 opens the panel.
 
 > **Status: prototype, in daily use.** Placing, stretching, parallel and switching blocks,
-> labels, TODOs, other days and wake/sleep marks are done and saved. Still open: rewards, and
+> labels, TODOs, stickers, other days and wake/sleep marks are done and saved. Still open: rewards, and
 > what the menu bar should show while blocks run. See [docs/interaction.md](docs/interaction.md).
 
 ## The timeline
@@ -89,6 +89,13 @@ A block can be **linked to one TODO** of its day from the block's right-click me
 "Working on"; its label doesn't have to match the TODO. A thin dashed curve in the TODO's colour
 runs from the block to the bubble. Several blocks can work on one TODO.
 
+## Stickers
+
+Right-click any empty spot, **past or ahead** → *Add sticker* slaps a die-cut sticker there for
+what got done or went well that day ("got an interview invite"). Type a line per win (Enter
+for a new line; ⌘Enter or click away to keep it); each line gets a gold ★. Click it to edit,
+drag it anywhere, right-click it for *Edit* and *Remove*.
+
 ## Other days, getting up and going to bed
 
 - **The calendar icon** at the top right opens a month. Days with something in them have a dot.
@@ -109,7 +116,7 @@ stretch.log.<seq>    the two most recent rotated segments
 ```
 
 The store is WAL-flavoured: each change appends the full image of the day it touched (its
-blocks, switching groups, TODOs and marks), as one line, and syncs it with `F_FULLFSYNC` before
+blocks, switching groups, TODOs, stickers and marks), as one line, and syncs it with `F_FULLFSYNC` before
 telling the page it's saved. The label list is one more record, keyed `labels`. Recovery is
 snapshot plus replay. A torn final line is truncated, and damage anywhere else stops the app
 from writing rather than dropping history. The page keeps no other copy. The full design,
@@ -152,7 +159,7 @@ src/                     frontend, served as-is (no framework, no bundler)
   index.html             the panel: header and timeline
   ts/                    the page's TypeScript; tsc emits each file to js/ (gitignored)
   ts/stretch.ts          the timeline: placing, the roll, elastic pull, free placement, labels,
-                         switching, TODOs, marks, the calendar, persistence
+                         switching, TODOs, stickers, marks, the calendar, persistence
   ts/types.ts            the record schema and the StretchBridge interface
   ts/day.ts              the 4:30 am day boundary and the calendar grid (shared with the tests)
   ts/switching.ts        focused time for switching groups (shared with the tests)
