@@ -344,7 +344,9 @@ Each round was built, installed and tried in the menu bar panel.
     has no tail: its left edge sits at the spot (pulled in to fit) and its middle at the time.
     *Feedback (same day):* no texture for now, but no rounded corners either — a small piece of
     paper — with a corner slightly folded up. The card is square-cornered with its bottom-right
-    corner clipped off and a dog-ear flap (a shade darker, inked) drawn over the cut.
+    corner clipped off and a dog-ear flap (a shade darker, inked) drawn over the cut. *Then:*
+    the blocks get the white die-cut edge too, 1 px just inside the ink (an overlay, so the
+    spent fill doesn't cover it).
 
 ## Current behaviour
 

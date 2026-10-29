@@ -157,6 +157,12 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--st-ink);outline
   transition:height 1s linear;
 }
 .st-block.pulling .st-fill{transition:none}
+/* the white die-cut edge just inside the ink, like the stickers'; an overlay, so the spent fill
+   doesn't paint over it the way it would an inset box-shadow */
+.st-block::after{
+  content:"";position:absolute;inset:0;pointer-events:none;
+  border:1px solid #FFFFFF;
+}
 
 /* the badge on a labeled block: a mini bubble — rounded box, sharp tail, solid offset shadow —
    wearing the label's first words. It's a lane child pinned to its block by placeBadge
