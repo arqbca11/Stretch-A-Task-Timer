@@ -6,7 +6,7 @@ A macOS menu bar app: a day timeline where you press and hold to place a task bl
 as thin columns placed freely left to right (1×–4× the narrowest width, wider for the task taking
 the most attention; alignment goes by centre line) (blocks that overlap in x are one queue, like
 processes on a core; 2–3 running blocks can be marked as "switching" — time-sliced on one core,
-not parallel). TODOs — bright bubbles placed in the future by right-click — say what's to be
+not parallel). TODOs — pastel bubbles placed in the future by right-click — say what's to be
 finished that day, and a block can be linked to one; stickers — die-cut, right-clicked anywhere
 in the day — list what got done or went well. Blocks aren't named by typing: they're
 labeled with task types from a global, stored label list, and a labeled block wears a

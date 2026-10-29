@@ -379,12 +379,12 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--st-ink);outline
   fill:var(--st-bg);stroke:var(--st-ink);stroke-width:2;stroke-linejoin:miter;stroke-miterlimit:10;
 }
 
-/* TODOs: something to finish today — a small speech bubble in a loud colour (--st-c, from
-   TODO_PALETTE in stretch.js), its tail's tip on the spot it was put. Black text on every
+/* TODOs: something to finish today — a small speech bubble in a light pastel (--st-c, from
+   TODO_PALETTE in stretch.ts), its tail's tip on the spot it was put. Black text on every
    colour, in either theme. placeTodo sets left/top and the tail's points; it hangs to the
    right of the tip, or the left (.flip) near the panel's edge. Its box ticks it off. */
 .st-todo{
-  --st-c:255,234,0;
+  --st-c:255,240,150;
   position:absolute;z-index:6;display:flex;align-items:flex-start;gap:5px;max-width:150px;
   padding:3px 8px 2px 6px;
   font-size:11px;font-weight:700;line-height:1.35;color:#000;

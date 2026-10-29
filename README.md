@@ -3,7 +3,7 @@
 A macOS menu bar timeline for working on several things at once. Today is a vertical strip of
 time. You **press and hold** to drop a block where you want to start, a die rolls how long it
 runs, and you **pull it like a rubber band** to make it shorter or longer. Blocks sit side by
-side as thin columns, one per thread of work, and bright **TODO** bubbles mark what has to be
+side as thin columns, one per thread of work, and pastel **TODO** bubbles mark what has to be
 finished today, while die-cut **stickers** collect what got done or went well.
 
 Built with [Tauri 2](https://tauri.app): a Rust backend with its own append-only log storage,
@@ -80,8 +80,8 @@ of a label on one centre line, and aligned blocks of a label are joined by a das
 
 ## TODOs
 
-Right-click an empty spot **ahead of now** → *Add TODO* puts a small bubble there in a loud
-colour (highlighter yellow, magenta, cyan, neon green, orange in turn), its tail on the spot, and
+Right-click an empty spot **ahead of now** → *Add TODO* puts a small bubble there in a light
+pastel (butter, pink, sky, mint, peach in turn), its tail on the spot, and
 opens it for typing what to finish. Click it to edit, tick its box when it's done, drag it
 anywhere, right-click it for *Edit*, *Done* and *Remove*.
 

@@ -1148,18 +1148,27 @@ interface Sticker extends StickerRecord { el?: HTMLDivElement; }   // el: set by
   });
 
   /* ---------- TODOs: things to finish today, and the blocks that work on them ---------- */
-  // Kept in the day record as `todos`. Each is a small speech bubble in a loud colour — the next
-  // in TODO_PALETTE — whose tail's tip sits on the spot it was put, (x, at). Right-click a blank
+  // Kept in the day record as `todos`. Each is a small speech bubble in a light pastel — the
+  // next in TODO_PALETTE — whose tail's tip sits on the spot it was put, (x, at). Right-click a blank
   // spot ahead of now to add one; it opens for typing what to do, and one left empty goes away.
   // Click it to edit, click its box to tick it off, drag it anywhere, right-click it for the
   // rest. A block links to one TODO of its day (BlockRecord.todo; its label needn't match), and
-  // a dashed curve in the TODO's colour runs from the block's nearest edge to the tail's tip.
+  // a dashed curve in a deeper shade of the TODO's hue (TODO_CORD; a pastel dash would vanish
+  // on the white lane) runs from the block's nearest edge to the tail's tip. A stored `color`
+  // indexes both, and keeps its hue from the loud ring these replaced.
   var TODO_PALETTE = [
-    "255,234,0",    // highlighter yellow
-    "255,46,166",   // magenta
-    "0,229,255",    // cyan
-    "80,255,40",    // neon green
-    "255,128,0"     // orange
+    "255,240,150",  // butter
+    "255,200,226",  // pink
+    "184,228,255",  // sky
+    "196,242,196",  // mint
+    "255,214,176"   // peach
+  ];
+  var TODO_CORD = [
+    "232,190,0",
+    "238,100,165",
+    "60,160,230",
+    "60,180,95",
+    "240,140,60"
   ];
   var TODO_TIP = 8;   // px: the tail tip's x from the box's inner edge on the tail's side
   var todoInput: HTMLInputElement | null = null;   // the TODO being typed into
@@ -1381,7 +1390,7 @@ interface Sticker extends StickerRecord { el?: HTMLDivElement; }   // el: set by
     if (px === l || px === l + w) c1x += (px === l ? -1 : 1) * k;   // off a side edge: sideways
     else c1y += (py === top ? -1 : 1) * k;                          // off the top or bottom: up or down
     el.style.display = len < 4 ? "none" : "";
-    el.style.stroke = "rgb(" + TODO_PALETTE[t.color] + ")";
+    el.style.stroke = "rgb(" + TODO_CORD[t.color] + ")";
     el.setAttribute("d", "M" + px + " " + py + " C" + c1x + " " + c1y + " " + tx + " " + (ty + k) + " " + tx + " " + ty);
   }
   function placeLinksTo(t: Todo){

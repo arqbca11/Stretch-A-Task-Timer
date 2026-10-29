@@ -347,6 +347,11 @@ Each round was built, installed and tried in the menu bar panel.
     corner clipped off and a dog-ear flap (a shade darker, inked) drawn over the cut. *Then:*
     the blocks get the white die-cut edge too, 1 px just inside the ink (an overlay, so the
     spent fill doesn't cover it).
+37. **Lighter TODOs.** *Ask (2026-10-28):* a different, lighter-feeling palette for the TODOs.
+    `TODO_PALETTE` went from the loud ring to pastels of the same hues — butter, pink, sky,
+    mint, peach — so a stored `color` keeps its hue. Black text still reads on all of them.
+    A pastel dash would vanish on the white lane, so the cord to a linked block now takes a
+    deeper shade of the same hue from a parallel `TODO_CORD`.
 
 ## Current behaviour
 
@@ -365,11 +370,12 @@ Each round was built, installed and tried in the menu bar panel.
 - **TODOs:** right-click a blank spot ahead of now (not in the grey past; anywhere on a future
   day) → *Add TODO* puts a small speech bubble there, its tail's tip on the spot, and opens it
   for typing; Enter or a click elsewhere keeps the text, Escape goes back, and one left empty
-  goes away. Each takes the next colour in `TODO_PALETTE`, black text on all of them. Click it
+  goes away. Each takes the next pastel in `TODO_PALETTE` (butter, pink, sky, mint, peach),
+  black text on all of them. Click it
   to edit, click its box to tick it off (struck through), drag it anywhere 1:1; right-click
   it → *Edit*, *Done* / *Not done yet*, *Remove*. A block's right-click menu lists the day's
   TODOs under "Working on": picking one links the block to it (picking it again unlinks it), and
-  a thin dashed curve in the TODO's colour runs from the block's nearest edge (leaving square to
+  a thin dashed curve in a deeper shade of the TODO's colour (`TODO_CORD`) runs from the block's nearest edge (leaving square to
   it) up into the tail's tip. One TODO can
   have several blocks; a block has at most one. The block's label doesn't have to match.
   Hovering a linked block adds "for “…”". Removing a TODO unlinks its blocks.
@@ -488,7 +494,7 @@ block   { id, task, x, span, start, plan (min), created, end, color, label, note
                                      in the data but no longer shown; todo is the id of
                                      a TODO of the same day, or null
 todo    { id, x, at, text, color, done }   the tail's tip at x px in the lane and time
-                                     `at`; color indexes TODO_PALETTE; a TODO with no text
+                                     `at`; color indexes TODO_PALETTE (and TODO_CORD); a TODO with no text
                                      is never written
 sticker { id, x, at, lines }         left edge at x px (pulled in to fit), middle at time
                                      `at`; lines are the wins; one with no lines is never
