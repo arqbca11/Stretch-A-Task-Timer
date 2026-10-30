@@ -81,7 +81,7 @@ src-tauri/
   tauri.conf.json
 scripts/draw-icons.swift draws the tray and app icons (CoreGraphics); regenerate commands inside
 test/                    node --test suites (.ts, run directly) for src/ts/day.ts and switching.ts
-docs/                    interaction.md, storage.md
+docs/                    interaction.md, storage.md, companion.md (the agent roadmap)
 legacy/                  gitignored, local only: the archived Roll app (see Legacy)
 ```
 
